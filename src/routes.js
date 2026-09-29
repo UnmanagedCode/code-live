@@ -26,7 +26,7 @@ export const ROUTES = [
     },
   },
 
-  { method: 'GET', path: '/api/models', handler: () => ({ body: { models: MODELS.map(({ id, label }) => ({ id, label })) } }) },
+  { method: 'GET', path: '/api/models', handler: () => ({ body: { models: MODELS.map(({ id, label, hint }) => ({ id, label, ...(hint ? { hint } : {}) })) } }) },
 
   {
     method: 'POST', path: '/api/token', json: true,

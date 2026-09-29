@@ -25,6 +25,18 @@ test('the catalog is exactly the three pinned models', () => {
   assert.deepEqual(MODELS.map((m) => m.id), ['gemini-3.8-live', 'gemini-3.8-live-extended-thinking', 'gemini-3.1-flash-live-preview']);
 });
 
+test('GET /api/models lists id, label and any hint', async (t) => {
+  const { app } = await setup(t, { key: false });
+  const r = await req(`${app.url}/api/models`);
+  assert.deepEqual(r.json, {
+    models: [
+      { id: 'gemini-3.8-live', label: 'Gemini 3.8 Live' },
+      { id: 'gemini-3.8-live-extended-thinking', label: 'Gemini 3.8 Live Extended Thinking', hint: 'tool calls unreliable' },
+      { id: 'gemini-3.1-flash-live-preview', label: 'Gemini 3.1 Flash Live Preview' },
+    ],
+  });
+});
+
 for (const model of MODELS) {
   test(`mint for ${model.id} sends the verified setup`, async (t) => {
     const { gemini, app } = await setup(t);

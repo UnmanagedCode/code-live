@@ -94,7 +94,7 @@ $('connect').addEventListener('click', async () => {
 $('disconnect').addEventListener('click', () => session.disconnect());
 
 api.getModels()
-  .then(({ models }) => $('model').replaceChildren(...models.map((m) => el('option', { value: m.id }, m.label))))
+  .then(({ models }) => $('model').replaceChildren(...models.map((m) => el('option', { value: m.id }, m.hint ? `${m.label} (${m.hint})` : m.label))))
   .catch((e) => transcript.add('error', `Loading models failed: ${e.message}`));
 targetPicker.load();
 

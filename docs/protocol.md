@@ -27,7 +27,7 @@ The route table is `ROUTES` in `src/routes.js`.
 | GET | `/api/settings` | none | `{apiKey:{set:boolean, tail:string\|null}}` (tail = last 4 chars) |
 | PUT | `/api/settings/api-key` | `{apiKey:string}` | `{apiKey:{set,tail}}`. `400 INVALID_KEY` unless it is 20–512 printable non-space ASCII characters after trimming (the message never echoes the value) |
 | DELETE | `/api/settings/api-key` | none | `{apiKey:{set:false, tail:null}}` |
-| GET | `/api/models` | none | `{models:[{id,label}]}` |
+| GET | `/api/models` | none | `{models:[{id, label, hint?}]}`; `hint` is present only for models that have one in `MODELS` |
 | POST | `/api/token` | `{model:string, resumeHandle?:string}` | `{token, wsUrl, model, expireTime}`; see [Token minting](#token-minting) |
 | POST | `/api/tools/call` | `{name:string, args?:object}` | always `200` with the [tool result](#tool-results); `400 INVALID_ARGS` only when `name` is not a string |
 | GET | `/api/conductors` | none | same as the `list_conductor_sessions` result |
