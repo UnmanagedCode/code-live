@@ -114,15 +114,18 @@ export function createConductorService({ api, link, state, announcer, publish })
       return applyTarget(await resolve(id));
     },
 
+    // The active target as the page should show it: null unless the persisted
+    // id is a live conductor row (also when the host can't be asked).
     async getTarget() {
       const id = activeId();
       if (!id) return null;
+      let row;
       try {
-        const row = (await api.listInstances()).find((i) => i.id === id);
-        return { sessionId: id, title: row ? summarize(row).title : id };
+        row = (await api.listInstances()).find((i) => i.id === id);
       } catch {
-        return { sessionId: id, title: id };
+        return null;
       }
+      return isConductor(row) ? { sessionId: id, title: summarize(row).title } : null;
     },
   };
 }

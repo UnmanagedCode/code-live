@@ -55,13 +55,14 @@ export function createLiveSession({
       sock.binaryType = 'arraybuffer';
       pending = sock;
       let ready = false;
+      let timer = null; // declared before fail(): an injected timer may fire synchronously
       const fail = (message) => {
         ready = true;
         timers.clearTimeout(timer);
         if (pending === sock) pending = null;
         reject(new Error(message));
       };
-      const timer = timers.setTimeout(() => {
+      timer = timers.setTimeout(() => {
         if (ready) return;
         fail(`Gemini did not complete setup within ${Math.round(setupTimeoutMs / 1000)} s`);
         sock.close();

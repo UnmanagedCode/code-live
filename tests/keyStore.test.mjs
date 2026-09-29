@@ -104,3 +104,28 @@ test('interleaved stateStore updates leave the file at the last update', async (
   assert.deepEqual(store.get(), { activeTargetId: 'c-48', lastHandledTurnSeq: 49 });
   assert.deepEqual((await fs.readdir(config.dataDir)).sort(), ['state.json'], 'no temp files left');
 });
+
+test('stateStore writes land in update order even when writes finish out of order', async (t) => {
+  const { root, config } = await setup();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  // Each write completes only when released; the driver releases whatever is
+  // pending newest-first, so any overlap between writes would let an older
+  // snapshot land last.
+  let disk = null;
+  const pending = [];
+  const write = (_file, data) => new Promise((resolve) => pending.push(() => { disk = data; resolve(); }));
+  const store = createStateStore({ dir: config.dataDir, write });
+  const updates = [];
+  for (let i = 0; i < 20; i++) updates.push(store.update({ lastHandledTurnSeq: i }));
+  let done = false;
+  const all = Promise.all(updates).then(() => { done = true; });
+  let maxInFlight = 0;
+  while (!done) {
+    await new Promise((r) => setImmediate(r));
+    maxInFlight = Math.max(maxInFlight, pending.length);
+    while (pending.length) pending.pop()();
+  }
+  await all;
+  assert.equal(maxInFlight, 1, 'one write in flight at a time');
+  assert.deepEqual(JSON.parse(disk), { activeTargetId: null, lastHandledTurnSeq: 19 });
+});

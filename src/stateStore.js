@@ -5,7 +5,8 @@ import { writeFileAtomic, readJson } from './atomicFile.js';
 
 const EMPTY = { activeTargetId: null, lastHandledTurnSeq: -1 };
 
-export function createStateStore({ dir }) {
+// `write` is injectable so tests can make write completion order observable.
+export function createStateStore({ dir, write = writeFileAtomic }) {
   const file = path.join(dir, 'state.json');
   let state = { ...EMPTY };
   let writing = Promise.resolve(); // serializes writes so the file ends in update order
@@ -27,7 +28,7 @@ export function createStateStore({ dir }) {
     async update(patch) {
       state = { ...state, ...patch };
       const snapshot = JSON.stringify(state);
-      writing = writing.catch(() => {}).then(() => writeFileAtomic(file, snapshot));
+      writing = writing.catch(() => {}).then(() => write(file, snapshot));
       await writing;
       return { ...state };
     },

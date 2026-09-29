@@ -225,3 +225,20 @@ test('disconnect works while connecting and while reconnecting', async (t) => {
   assert.equal(mints(gemini).length, 4, 'connect, connect, one resume attempt, connect');
   assert.equal(gemini.sessions.length, 4);
 });
+
+test('a setup timer that fires synchronously still fails and closes the socket', async (t) => {
+  const sockets = [];
+  class Recording extends WebSocket {
+    constructor(...a) { super(...a); sockets.push(this); }
+  }
+  const { events, session } = await setup(t, {}, {
+    WebSocketImpl: Recording,
+    setupTimeoutMs: 15000,
+    timers: { setTimeout: (fn) => { fn(); return 0; }, clearTimeout: () => {} },
+  });
+  await session.connect('gemini-3.8-live');
+  assert.equal(session.state, 'error');
+  assert.equal(events.at(-1).detail, 'Gemini did not complete setup within 15 s');
+  assert.equal(sockets.length, 1);
+  assert.ok(sockets[0].readyState >= 2, 'the socket is closing or closed');
+});

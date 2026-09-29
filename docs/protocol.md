@@ -51,7 +51,7 @@ Each frame is `id: <boot>-<n>` / `event: <name>` / `data: <json>`. `<boot>` is r
 
 | event | data | sent |
 |---|---|---|
-| `target` | `{sessionId, title}` or `null` | on connect (current value, **no id**), and on every target change |
+| `target` | `{sessionId, title}` or `null` | on connect (**no id**; the current target, or `null` unless it is a live conductor row the host confirms), and on every target change |
 | `host` | `{connected:boolean}` | on connect (no id), and when the backend's host `/ws` link opens or closes |
 | `announce` | `{sessionId, title, text, turnSeq, isError}` | when the active target finishes a turn. `text` is at most 4000 chars, or `(turn finished with no text reply)` |
 

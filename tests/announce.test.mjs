@@ -190,3 +190,21 @@ test('the announced text is the reply before the turn_end, not the next turn\'s'
   assert.equal(ev.data.text, 'reply to turn one');
   assert.equal(ev.data.turnSeq, end._seq);
 });
+
+test('a persisted worker id is never shown as the target', async (t) => {
+  const host = await startFakeHost({ instances: [CONDUCTOR_A, WORKER] });
+  const app = await startApp({ host });
+  t.after(async () => { await app.stop(); await host.close(); });
+  // As if state.json were hand-edited; no reconcile has run since.
+  await app.deps.state.update({ activeTargetId: 'worker-1', lastHandledTurnSeq: -1 });
+  assert.equal(await app.deps.service.getTarget(), null);
+  const sse = sseClient(`${app.url}/api/events`);
+  t.after(() => sse.close());
+  const first = await sse.next('target');
+  assert.equal(first.data, null);
+  assert.equal(sse.events[0], first, 'the initial event names no target');
+  await app.deps.state.update({ activeTargetId: 'cond-a' });
+  assert.deepEqual(await app.deps.service.getTarget(), { sessionId: 'cond-a', title: 'Alpha plan' });
+  await host.close();
+  assert.equal(await app.deps.service.getTarget(), null, 'unverifiable while the host is down');
+});
