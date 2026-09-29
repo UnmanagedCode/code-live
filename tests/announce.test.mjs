@@ -168,3 +168,25 @@ test('a turn with no text reply is announced as such', async (t) => {
   assert.equal(ev.data.text, '(turn finished with no text reply)');
   assert.equal(ev.data.isError, true);
 });
+
+test('a persisted worker id is never announced and is cleared', async (t) => {
+  const { host, app, sse } = await setup(t, { active: null });
+  await app.deps.state.update({ activeTargetId: 'worker-1', lastHandledTurnSeq: -1 });
+  host.finishTurn('worker-1', 'worker output');
+  const ev = await sse.next('target', (d) => d === null);
+  assert.equal(ev.data, null);
+  assert.equal(app.deps.state.get().activeTargetId, null);
+  assert.deepEqual(await drain(app, sse), []);
+  assert.ok(!host.requests.some((q) => q.url.startsWith('/api/instances/worker-1/')), 'no event read for the worker');
+});
+
+test('the announced text is the reply before the turn_end, not the next turn\'s', async (t) => {
+  const { host, app, sse } = await setup(t);
+  host.addEvent('cond-a', reply('reply to turn one'));
+  const end = host.addEvent('cond-a', { kind: 'turn_end', isError: false });
+  host.addEvent('cond-a', reply('turn two already talking'));
+  await app.deps.announcer.reconcile();
+  const ev = await sse.next('announce');
+  assert.equal(ev.data.text, 'reply to turn one');
+  assert.equal(ev.data.turnSeq, end._seq);
+});

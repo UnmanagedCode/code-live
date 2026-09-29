@@ -15,8 +15,10 @@ User-facing behavior of the Code Live page and its voice tools. Wire shapes are 
 ## Connecting
 
 - **Connect** creates the audio context (it needs a user gesture), mints a token for the selected model, and opens the Gemini Live socket. When the session is `live`, the microphone starts: echo cancellation and noise suppression on, mono, sent as 16 kHz PCM in ~100 ms chunks.
+- Each Gemini reply is one transcript bubble. An extended-thinking model reports a turn end with `interactionStatus: IN_PROGRESS` while it keeps working on the same reply (for example around a tool call); that keeps the bubble open. Any other status, or none, closes it.
 - Gemini's audio plays back gaplessly. When Gemini reports it was **interrupted** (you talked over it), queued audio is dropped.
-- **Disconnect** closes the session, stops the microphone and returns to `idle`.
+- If Gemini accepts the socket but doesn't finish the handshake (`setupComplete`) within 15 s, the attempt is abandoned: Connect ends in `error` with `Gemini did not complete setup within 15 s`, and a stalled resume counts as one failed attempt.
+- **Disconnect** closes the session, stops the microphone and returns to `idle`. It is enabled while `connecting` and `reconnecting` too, and abandons the attempt in progress.
 - When Gemini announces a connection end (`goAway`, about every 10 minutes) or the socket drops unexpectedly, the page shows `reconnecting` and resumes the same conversation on a fresh token. After 3 failed attempts in a row, or with no resumption handle yet, it goes to `error`; press **Connect** to start over.
 - Without a stored key, Connect fails with `No Gemini API key is set; add one in Settings`.
 

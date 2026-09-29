@@ -3,7 +3,7 @@
 // turn_notification, a host /ws reconnect, backend startup) runs the same
 // serialized reconcile over the REST events route, so a duplicate or missed
 // notification never double-announces or drops a turn.
-import { assistantText, hasSeq, summarize, truncate, MAX_TEXT } from './hostEvents.js';
+import { assistantText, hasSeq, isConductor, summarize, truncate, MAX_TEXT } from './hostEvents.js';
 
 const NO_TEXT = '(turn finished with no text reply)';
 
@@ -25,27 +25,29 @@ export function createAnnouncer({ api, link, state, publish }) {
     return run;
   }
 
-  async function titleOf(id) {
-    try {
-      const inst = (await api.listInstances()).find((i) => i.id === id);
-      return inst ? summarize(inst).title : id;
-    } catch {
-      return id;
-    }
+  async function dropTarget() {
+    await state.update({ activeTargetId: null });
+    publish('target', null);
   }
 
   async function doReconcile() {
     const { activeTargetId: id, lastHandledTurnSeq } = state.get();
     if (!id) return;
+    let row;
+    try {
+      row = (await api.listInstances()).find((i) => i.id === id);
+    } catch (e) {
+      console.error('code-live: reconcile failed:', e.message);
+      return;
+    }
+    // Only a live conductor is ever announced; a persisted id that is gone or
+    // names a worker is cleared.
+    if (!isConductor(row)) { await dropTarget(); return; }
     let data;
     try {
       data = await api.getEvents(id);
     } catch (e) {
-      if (e.code === 'SESSION_GONE') {
-        await state.update({ activeTargetId: null });
-        publish('target', null);
-        return;
-      }
+      if (e.code === 'SESSION_GONE') { await dropTarget(); return; }
       console.error('code-live: reconcile failed:', e.message);
       return;
     }
@@ -62,7 +64,7 @@ export function createAnnouncer({ api, link, state, publish }) {
     }
     publish('announce', {
       sessionId: id,
-      title: await titleOf(id),
+      title: summarize(row).title,
       text: text ? truncate(text, MAX_TEXT) : NO_TEXT,
       turnSeq: turnEnd._seq,
       isError: !!turnEnd.isError,

@@ -46,7 +46,13 @@ export function createServer(deps) {
   const { headers } = deps;
   const table = new Map(ROUTES.map((r) => [`${r.method} ${r.path}`, r]));
   return http.createServer(async (req, res) => {
-    const pathname = new URL(req.url, 'http://localhost').pathname;
+    let pathname;
+    try {
+      pathname = new URL(req.url, 'http://localhost').pathname;
+    } catch {
+      // e.g. `//`, which URL parses as a host-less authority.
+      return sendJson(res, 400, { error: 'malformed request target', code: 'BAD_REQUEST' }, headers);
+    }
     try {
       const route = table.get(`${req.method} ${pathname}`);
       if (route) {

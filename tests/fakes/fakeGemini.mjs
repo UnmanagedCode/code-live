@@ -65,7 +65,7 @@ export async function startFakeGemini() {
         try { msg = JSON.parse(data.toString('utf8')); } catch { return; }
         Object.defineProperty(msg, '_taken', { value: false, writable: true, enumerable: false });
         messages.push(msg);
-        if (msg.setup) session.send({ setupComplete: {} });
+        if (msg.setup && connectMode !== 'silent') session.send({ setupComplete: {} });
         const i = waiters.findIndex((w) => w.predicate(msg));
         if (i >= 0) { msg._taken = true; waiters.splice(i, 1)[0].resolve(msg); }
       });
@@ -81,6 +81,7 @@ export async function startFakeGemini() {
     requests,
     sessions,
     setMintFailure(f) { mintFailure = f; },
+    // 'ok' | 'reject' (close before setupComplete) | 'silent' (never send setupComplete)
     setConnectMode(m) { connectMode = m; },
     async session(i) {
       while (sessions.length <= i) await new Promise((r) => sessionWaiters.push(r));

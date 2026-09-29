@@ -145,6 +145,11 @@ test('host ack failures surface as tool errors', async (t) => {
   const refused = await callTool(app, 'send_to_conductor', { text: 'x' });
   assert.equal(refused.code, 'HOST_REFUSED');
   assert.match(refused.message, /not running/);
+  assert.equal(app.deps.state.get().activeTargetId, 'cond-a');
+  const switched = await callTool(app, 'send_to_conductor', { text: 'x', session: 'cond-b' });
+  assert.equal(switched.code, 'HOST_REFUSED');
+  assert.ok(switched.message.endsWith('("Build the beta release pipeline and report back on everythi…" is now the active target.)'), switched.message);
+  assert.equal(app.deps.state.get().activeTargetId, 'cond-b', 'the switch stands');
   host.setAckMode('silent');
   assert.equal((await callTool(app, 'send_to_conductor', { text: 'x' })).code, 'ACK_TIMEOUT');
 });

@@ -10,14 +10,14 @@ import { startFakeGemini } from './fakes/fakeGemini.mjs';
 import { startFakeHost } from './fakes/fakeHost.mjs';
 import { startApp, waitFor, SENTINEL_KEY, CONDUCTOR_A, WORKER } from './helpers.mjs';
 
-async function setup(t, apiOverrides = {}) {
+async function setup(t, apiOverrides = {}, sessionOpts = {}) {
   const gemini = await startFakeGemini();
   const host = await startFakeHost({ instances: [CONDUCTOR_A, WORKER] });
   const app = await startApp({ gemini, host });
   await app.deps.keyStore.set(SENTINEL_KEY);
   const api = { ...createApi((u, o) => fetch(new URL(u, app.url + '/'), o)), ...apiOverrides };
   const events = [];
-  const session = createLiveSession({ api, onEvent: (e) => events.push(e) });
+  const session = createLiveSession({ api, onEvent: (e) => events.push(e), ...sessionOpts });
   t.after(async () => { session.disconnect(); await app.stop(); await host.close(); await gemini.close(); });
   return { gemini, host, app, api, events, session };
 }
@@ -165,4 +165,63 @@ test('disconnect goes idle and closes the socket', async (t) => {
   session.disconnect();
   assert.equal(session.state, 'idle');
   assert.equal(await s0.closed, 1000);
+});
+
+test('a handshake with no setupComplete times out: connect ends in error', async (t) => {
+  const { gemini, events, session } = await setup(t, {}, { setupTimeoutMs: 30 });
+  gemini.setConnectMode('silent');
+  await session.connect('gemini-3.8-live');
+  assert.equal(session.state, 'error');
+  assert.match(events.at(-1).detail, /did not complete setup/);
+  assert.ok(await (await gemini.session(0)).closed, 'the stalled socket is closed');
+  // A new Connect works once the server answers again.
+  gemini.setConnectMode('ok');
+  await session.connect('gemini-3.8-live');
+  assert.equal(session.state, 'live');
+});
+
+test('a stalled resume counts as a failed attempt', async (t) => {
+  const { gemini, events, session } = await setup(t, {}, { setupTimeoutMs: 30 });
+  await session.connect('gemini-3.8-live');
+  const s0 = await gemini.session(0);
+  s0.send({ sessionResumptionUpdate: { newHandle: 'h1', resumable: true } });
+  gemini.setConnectMode('silent');
+  s0.send({ goAway: { timeLeft: '1s' } });
+  await waitFor(() => session.state === 'error');
+  assert.equal(mints(gemini).length, 4, 'one connect + three timed-out resume attempts');
+  assert.equal(gemini.sessions.length, 4);
+  assert.match(events.at(-1).detail, /did not complete setup/);
+});
+
+test('disconnect works while connecting and while reconnecting', async (t) => {
+  const { gemini, events, session } = await setup(t, {}, { setupTimeoutMs: 60000 });
+  gemini.setConnectMode('silent');
+  const connecting = session.connect('gemini-3.8-live');
+  const s0 = await gemini.session(0);
+  assert.equal(session.state, 'connecting');
+  session.disconnect();
+  assert.equal(session.state, 'idle');
+  // Closed from the client side (1000, or 1006 if still CONNECTING there).
+  assert.ok([1000, 1006].includes(await s0.closed));
+  await connecting;
+  assert.equal(session.state, 'idle', 'the abandoned attempt does not report an error');
+
+  gemini.setConnectMode('ok');
+  await session.connect('gemini-3.8-live');
+  const s1 = await gemini.session(1);
+  s1.send({ sessionResumptionUpdate: { newHandle: 'h1', resumable: true } });
+  gemini.setConnectMode('silent');
+  s1.send({ goAway: { timeLeft: '1s' } });
+  const s2 = await gemini.session(2);
+  assert.equal(session.state, 'reconnecting');
+  session.disconnect();
+  assert.equal(session.state, 'idle');
+  assert.ok([1000, 1006].includes(await s2.closed));
+  assert.equal(states(events).at(-1), 'idle');
+  // A fresh connect is the only new mint: the abandoned resume loop stopped.
+  gemini.setConnectMode('ok');
+  await session.connect('gemini-3.8-live');
+  assert.equal(session.state, 'live');
+  assert.equal(mints(gemini).length, 4, 'connect, connect, one resume attempt, connect');
+  assert.equal(gemini.sessions.length, 4);
 });

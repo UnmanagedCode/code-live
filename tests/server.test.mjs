@@ -14,6 +14,20 @@ async function setup(t) {
   return { gemini, app };
 }
 
+// Raw request so the target reaches the server exactly as written.
+function rawGet(port, target) {
+  return new Promise((resolve, reject) => {
+    const r = http.request({ host: '127.0.0.1', port, path: target, method: 'GET' }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { body += c; });
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body }));
+    });
+    r.on('error', reject);
+    r.end();
+  });
+}
+
 function sseHeaders(url) {
   return new Promise((resolve, reject) => {
     const r = http.get(url, (res) => { resolve({ status: res.statusCode, headers: res.headers }); r.destroy(); });
@@ -83,4 +97,23 @@ test('JSON body gates: 415, 413, 400', async (t) => {
   assert.equal(r.json.code, 'INVALID_JSON');
   r = await req(url, { method: 'POST', raw: '[1]', headers: { 'content-type': 'application/json' } });
   assert.equal(r.status, 400);
+});
+
+test('a malformed request target is a 400 and the server keeps serving', async (t) => {
+  const { gemini, app } = await setup(t);
+  const port = new URL(app.url).port;
+  const csp = (await req(`${app.url}/api/health`)).headers.get('content-security-policy');
+  for (const target of ['//', '///', '//?x=1']) {
+    const r = await rawGet(port, target);
+    assert.equal(r.status, 400, target);
+    assert.deepEqual(JSON.parse(r.body), { error: 'malformed request target', code: 'BAD_REQUEST' });
+    assert.equal(r.headers['content-security-policy'], csp);
+    assert.equal(r.headers['x-content-type-options'], 'nosniff');
+    assert.equal(r.headers['referrer-policy'], 'no-referrer');
+    assert.equal(r.headers['cache-control'], 'no-store');
+  }
+  assert.ok(csp.includes(gemini.base.replace('http://', 'ws://')));
+  const health = await req(`${app.url}/api/health`);
+  assert.equal(health.status, 200);
+  assert.deepEqual(health.json, { ok: true });
 });

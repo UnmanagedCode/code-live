@@ -7,6 +7,7 @@ import { installTargetPicker } from './targetPicker.js';
 import { createLiveSession } from './liveSession.js';
 import { installAnnouncements } from './announcements.js';
 import { createPlayer } from './player.js';
+import { createSessionView } from './sessionView.js';
 import { downsample, floatToPcm16, pcm16ToBase64 } from './audio.js';
 import { el } from './dom.js';
 
@@ -28,28 +29,23 @@ let audioCtx = null;
 let player = null;
 let micStop = null;
 
+const view = createSessionView({
+  transcript,
+  // The player exists only after the first Connect (it needs the AudioContext).
+  player: { enqueue: (b64) => player?.enqueue(b64), flush: () => player?.flush() },
+});
 const session = createLiveSession({ api, onEvent });
 
 function onEvent(ev) {
-  switch (ev.type) {
-    case 'state':
-      $('state').textContent = ev.state;
-      $('state').dataset.state = ev.state;
-      $('connect').disabled = !(ev.state === 'idle' || ev.state === 'error');
-      $('disconnect').disabled = ev.state === 'idle' || ev.state === 'error';
-      if (ev.detail) transcript.add(ev.state === 'error' ? 'error' : 'status', ev.detail);
-      if (ev.state === 'live' && !micStop) startMic().catch((e) => transcript.add('error', `Microphone: ${e.message}`));
-      if (ev.state === 'idle' || ev.state === 'error') stopMic();
-      break;
-    case 'audio': player?.enqueue(ev.data); break;
-    case 'input_transcript': transcript.appendStream('you', ev.text); break;
-    case 'output_transcript': transcript.appendStream('gemini', ev.text); break;
-    case 'turn_complete': transcript.endTurn(); break;
-    case 'interrupted': player?.flush(); transcript.endTurn(); break;
-    case 'tool_call': transcript.add('tool_call', ev.args, { name: ev.name }); break;
-    case 'tool_result': transcript.add('tool_result', ev.result, { name: ev.name }); break;
-    case 'tool_cancelled': transcript.add('status', `Tool call cancelled (${ev.ids.join(', ')})`); break;
-  }
+  if (ev.type !== 'state') { view.handle(ev); return; }
+  $('state').textContent = ev.state;
+  $('state').dataset.state = ev.state;
+  // Disconnect stays enabled while connecting/reconnecting so a stuck attempt can be abandoned.
+  $('connect').disabled = !(ev.state === 'idle' || ev.state === 'error');
+  $('disconnect').disabled = ev.state === 'idle' || ev.state === 'error';
+  if (ev.detail) transcript.add(ev.state === 'error' ? 'error' : 'status', ev.detail);
+  if (ev.state === 'live' && !micStop) startMic().catch((e) => transcript.add('error', `Microphone: ${e.message}`));
+  if (ev.state === 'idle' || ev.state === 'error') stopMic();
 }
 
 async function startMic() {

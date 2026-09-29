@@ -91,3 +91,16 @@ test('stateStore round-trips, persists 0600 and rejects corrupt state', async (t
   await fs.writeFile(s1.file, JSON.stringify({ activeTargetId: 3, lastHandledTurnSeq: 'x' }));
   await assert.rejects(s2.load(), { code: 'STORE_CORRUPT' });
 });
+
+test('interleaved stateStore updates leave the file at the last update', async (t) => {
+  const { root, config } = await setup();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = createStateStore({ dir: config.dataDir });
+  await store.load();
+  const updates = [];
+  for (let i = 0; i < 50; i++) updates.push(store.update(i % 2 ? { lastHandledTurnSeq: i } : { activeTargetId: `c-${i}` }));
+  await Promise.all(updates);
+  assert.deepEqual(JSON.parse(await fs.readFile(store.file, 'utf8')), { activeTargetId: 'c-48', lastHandledTurnSeq: 49 });
+  assert.deepEqual(store.get(), { activeTargetId: 'c-48', lastHandledTurnSeq: 49 });
+  assert.deepEqual((await fs.readdir(config.dataDir)).sort(), ['state.json'], 'no temp files left');
+});

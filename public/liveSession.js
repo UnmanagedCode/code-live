@@ -17,8 +17,16 @@ function decode(data) {
   }
 }
 
-export function createLiveSession({ api, WebSocketImpl = globalThis.WebSocket, onEvent = () => {}, maxResumeFailures = 3 }) {
+export function createLiveSession({
+  api,
+  WebSocketImpl = globalThis.WebSocket,
+  onEvent = () => {},
+  maxResumeFailures = 3,
+  setupTimeoutMs = 15000,
+  timers = { setTimeout: (...a) => setTimeout(...a), clearTimeout: (t) => clearTimeout(t) },
+}) {
   let ws = null;
+  let pending = null; // socket still waiting for setupComplete
   let state = 'idle';
   let model = null;
   let handle = null;
@@ -37,14 +45,27 @@ export function createLiveSession({ api, WebSocketImpl = globalThis.WebSocket, o
   }
 
   // Opens a socket, sends the (empty) client setup and resolves once the
-  // server's setupComplete arrives; from then on the socket is current.
+  // server's setupComplete arrives; from then on the socket is current. No
+  // setupComplete within setupTimeoutMs closes the socket and rejects.
   async function open(gen, resumeHandle) {
     const tok = await api.mintToken(model, resumeHandle);
     if (gen !== generation) throw new Error('superseded');
     return new Promise((resolve, reject) => {
       const sock = new WebSocketImpl(tok.wsUrl + '?access_token=' + encodeURIComponent(tok.token));
       sock.binaryType = 'arraybuffer';
+      pending = sock;
       let ready = false;
+      const fail = (message) => {
+        ready = true;
+        timers.clearTimeout(timer);
+        if (pending === sock) pending = null;
+        reject(new Error(message));
+      };
+      const timer = timers.setTimeout(() => {
+        if (ready) return;
+        fail(`Gemini did not complete setup within ${Math.round(setupTimeoutMs / 1000)} s`);
+        sock.close();
+      }, setupTimeoutMs);
       sock.addEventListener('open', () => sock.send(JSON.stringify({ setup: {} })));
       sock.addEventListener('message', (ev) => {
         const msg = decode(ev.data);
@@ -52,6 +73,8 @@ export function createLiveSession({ api, WebSocketImpl = globalThis.WebSocket, o
         if (!ready) {
           if (!msg.setupComplete) return;
           ready = true;
+          timers.clearTimeout(timer);
+          if (pending === sock) pending = null;
           if (gen !== generation) { sock.close(1000); reject(new Error('superseded')); return; }
           ws = sock;
           resolve();
@@ -60,7 +83,7 @@ export function createLiveSession({ api, WebSocketImpl = globalThis.WebSocket, o
         if (ws === sock) handleMessage(msg);
       });
       sock.addEventListener('close', (ev) => {
-        if (!ready) { ready = true; reject(new Error(`Gemini closed the connection (${ev.code}${ev.reason ? ': ' + ev.reason : ''})`)); return; }
+        if (!ready) { fail(`Gemini closed the connection (${ev.code}${ev.reason ? ': ' + ev.reason : ''})`); return; }
         if (ws !== sock) return;
         ws = null;
         if (state === 'live' && handle) resume();
@@ -145,12 +168,17 @@ export function createLiveSession({ api, WebSocketImpl = globalThis.WebSocket, o
       }
     },
 
+    // Works in every state, including mid-connect and mid-resume: the
+    // handshaking socket is closed and the in-flight attempt is abandoned.
     disconnect() {
       generation++;
       const sock = ws;
+      const handshaking = pending;
       ws = null;
+      pending = null;
       handle = null;
       if (sock) sock.close(1000);
+      if (handshaking) handshaking.close(1000);
       if (state !== 'idle') setState('idle');
     },
 

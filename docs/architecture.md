@@ -21,11 +21,11 @@ browser (Code Live page)                       code-live backend (node:http)    
 
 | file | responsibility |
 |---|---|
-| `server.js` | entry: `buildDeps(config, opts)` builds the collaborators; `createServer(deps)` does routing, the JSON body gate, static files and error mapping (`STATUS_BY_CODE`); `start()` listens (retrying on `EADDRINUSE`), starts the host link, runs the startup reconcile and handles SIGTERM. It auto-starts only when run directly |
+| `server.js` | entry: `buildDeps(config, opts)` builds the collaborators; `createServer(deps)` does routing (a request target that fails to parse is `400 BAD_REQUEST`), the JSON body gate, static files and error mapping (`STATUS_BY_CODE`); `start()` listens (retrying on `EADDRINUSE`), starts the host link, runs the startup reconcile and handles SIGTERM. It auto-starts only when run directly |
 | `src/config.js` | `loadConfig(env)`: env → config; throws on a missing `PROJECTS_ROOT` / `CONDUCTOR_URL`; derives `dataDir`, `geminiWsUrl` and `hostWsUrl` |
 | `src/atomicFile.js` | `writeFileAtomic` (0600 temp file + rename + chmod, directory 0700) and `readJson` (`null` if absent, `STORE_CORRUPT` if unparseable) |
 | `src/keyStore.js` | `secrets.json`: `get` (the only key accessor, used only by `gemini.js`), `status`, `set` (validation), `clear` |
-| `src/stateStore.js` | `state.json`: `{activeTargetId, lastHandledTurnSeq}` with serialized writes |
+| `src/stateStore.js` | `state.json`: `{activeTargetId, lastHandledTurnSeq}`; writes are serialized, so the file ends at the last `update` |
 | `src/models.js` | `MODELS`, the pinned catalog with per-model `thinkingLevel` / `toolBehavior` and the optional picker `hint`; `getModel` |
 | `src/tools.js` | `DECLARATIONS` (the single source for the Gemini setup and the dispatcher), `toolDeclarations(model)`, and `callTool` (validation + dispatch; never throws) |
 | `src/liveSetup.js` | `SYSTEM_PROMPT`, `buildSetup(modelId, resumeHandle)` |
@@ -41,8 +41,9 @@ browser (Code Live page)                       code-live backend (node:http)    
 
 | frontend file | responsibility |
 |---|---|
-| `public/app.js` | wiring only: builds the modules, connects the buttons, runs the mic (AudioWorklet → 100 ms chunks → 16 kHz PCM16 base64) and playback |
-| `public/liveSession.js` | DOM-free Gemini Live client: states, message → event mapping, tool round-trip, cancellation, resume |
+| `public/app.js` | wiring only: builds the modules, connects the buttons, reflects session state, runs the mic (AudioWorklet → 100 ms chunks → 16 kHz PCM16 base64) and playback |
+| `public/liveSession.js` | DOM-free Gemini Live client: states, message → event mapping, tool round-trip, cancellation, resume, the bounded `setupComplete` wait (`setupTimeoutMs`, injectable `timers`), and `disconnect()` from any state |
+| `public/sessionView.js` | session events → transcript and speaker; `isReplyEnd` (a `turnComplete` with `interactionStatus: IN_PROGRESS` doesn't end the bubble) |
 | `public/api.js` | backend client (relative URLs, `cache:'no-store'`) |
 | `public/transcript.js` | transcript rendering, merging streamed transcription chunks |
 | `public/settings.js`, `public/targetPicker.js` | the Settings pane and the target picker |
@@ -78,10 +79,11 @@ Everything lives under `$PROJECTS_ROOT/.code-live/` (directory mode 0700). The p
 
 `reconcile()` is the only path that announces, and it is idempotent by `_seq`:
 
-1. It reads the active target's trailing 500 events.
-2. It takes the newest `turn_end` with `_seq > lastHandledTurnSeq`; with none, it stops.
-3. It persists that seq.
-4. It publishes the last non-empty assistant text with a lower `_seq`.
+1. It confirms the persisted target is a live conductor row in `GET /api/instances`. A missing row or a non-`.conduct` row clears the target (SSE `target: null`), so a worker is never announced. If the host is unreachable, it logs and stops.
+2. It reads the target's trailing 500 events.
+3. It takes the newest `turn_end` with `_seq > lastHandledTurnSeq`; with none, it stops.
+4. It persists that seq.
+5. It publishes the last non-empty assistant text with a lower `_seq`.
 
 A 404 clears the target (SSE `target: null`); other errors are logged.
 

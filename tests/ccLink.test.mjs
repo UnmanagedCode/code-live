@@ -76,9 +76,12 @@ test('backoff doubles to the cap and resets after a successful open', async (t) 
   t.after(async () => { link.stop(); await srv?.close(); });
   const opens = [];
   link.on('open', (e) => opens.push(e));
+  let closes = 0;
+  link.on('close', () => closes++);
   link.start();
   await waitFor(() => delays.length >= 5, { what: 'five failed attempts' });
   assert.deepEqual(delays.slice(0, 5), [10, 20, 40, 50, 50]);
+  assert.equal(closes, 0, 'attempts that never opened emit no close');
 
   srv = await startWs(port);
   await waitFor(() => opens.length === 1, { what: 'open after restart' });
@@ -87,6 +90,7 @@ test('backoff doubles to the cap and resets after a successful open', async (t) 
   srv.drop();
   await waitFor(() => opens.length === 2, { what: 'reopen after drop' });
   assert.equal(delays[0], 10, 'attempt counter reset after success');
+  assert.equal(closes, 1, 'only the opened socket emitted close');
 });
 
 test('acks pair to prompts by reqId, in any order', async (t) => {

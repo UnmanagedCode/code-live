@@ -14,6 +14,7 @@ Interface contracts of the code-live backend, and the code-conductor and Gemini 
   - at most 64 KB, else `413 BODY_TOO_LARGE`;
   - a JSON object, else `400 INVALID_JSON`.
 - **Errors** are `{"error": "<message>", "code": "<CODE>"}`. Codes map to HTTP status as `STATUS_BY_CODE` in `server.js` defines. An unexpected error is `500 {"error":"internal error","code":"INTERNAL_ERROR"}`, logged server-side.
+- **Malformed request target:** a request target that does not parse as a path (e.g. `//`, which the host's proxy forwards for `/plugins/code-live//`) gets `400 {"error":"malformed request target","code":"BAD_REQUEST"}`, with the headers above.
 - **Static files:** every file in `public/` with a known extension is served at `/<name>`, and `/` serves `index.html`. Anything else is `404 {"error":"not found","code":"NOT_FOUND"}`.
 - The API key is never returned by any route.
 
@@ -144,7 +145,7 @@ All calls go to `$CONDUCTOR_URL`, with a 5 s timeout for REST.
 
 ### Live socket
 
-The page connects to `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained?access_token=<urlencoded token>`, sends `{"setup":{}}`, and is live on `{"setupComplete":{}}`. Server frames may be text or binary JSON, and empty `{}` frames are ignored.
+The page connects to `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained?access_token=<urlencoded token>`, sends `{"setup":{}}`, and is live on `{"setupComplete":{}}`. Without `setupComplete` within 15 s (`setupTimeoutMs`), the client closes the socket and treats the attempt as failed. Server frames may be text or binary JSON, and empty `{}` frames are ignored.
 
 **Client → Gemini:**
 
@@ -162,7 +163,7 @@ The page connects to `wss://generativelanguage.googleapis.com/ws/google.ai.gener
 | `serverContent.modelTurn.parts[].inlineData` (`audio/pcm;rate=24000`) | played |
 | `serverContent.inputTranscription.text` / `outputTranscription.text` | merged into You / Gemini bubbles |
 | `serverContent.interrupted` | playback flushed |
-| `serverContent.turnComplete` (+ `interactionStatus`) | transcript bubble closed |
+| `serverContent.turnComplete` (+ `interactionStatus`) | transcript bubble closed, unless `interactionStatus` is `IN_PROGRESS` |
 | `toolCall.functionCalls[{id,name,args}]` | `POST api/tools/call`, then `toolResponse` |
 | `toolCallCancellation.ids` | responses for those ids are dropped |
 | `sessionResumptionUpdate{newHandle,resumable}` | handle kept when `resumable` and non-empty |
