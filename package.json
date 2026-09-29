@@ -1,0 +1,16 @@
+{
+  "name": "code-live",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Voice console for code-conductor: talk to Gemini Live, which drives conductor sessions.",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node tests/run.mjs"
+  },
+  "devDependencies": {
+    "happy-dom": "^20.10.6",
+    "ws": "^8.21.0"
+  }
+}

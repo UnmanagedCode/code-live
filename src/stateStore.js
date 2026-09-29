@@ -1,0 +1,35 @@
+// Persistent runtime state at <dataDir>/state.json: the active conductor
+// target and the _seq of the last turn_end already announced for it.
+import path from 'node:path';
+import { writeFileAtomic, readJson } from './atomicFile.js';
+
+const EMPTY = { activeTargetId: null, lastHandledTurnSeq: -1 };
+
+export function createStateStore({ dir }) {
+  const file = path.join(dir, 'state.json');
+  let state = { ...EMPTY };
+  let writing = Promise.resolve(); // serializes writes so the file ends in update order
+
+  return {
+    file,
+    async load() {
+      const data = await readJson(file);
+      if (data === null) { state = { ...EMPTY }; return state; }
+      if (typeof data !== 'object'
+        || !(data.activeTargetId === null || typeof data.activeTargetId === 'string')
+        || typeof data.lastHandledTurnSeq !== 'number') {
+        throw Object.assign(new Error('state.json is malformed'), { code: 'STORE_CORRUPT' });
+      }
+      state = { activeTargetId: data.activeTargetId, lastHandledTurnSeq: data.lastHandledTurnSeq };
+      return state;
+    },
+    get() { return { ...state }; },
+    async update(patch) {
+      state = { ...state, ...patch };
+      const snapshot = JSON.stringify(state);
+      writing = writing.catch(() => {}).then(() => writeFileAtomic(file, snapshot));
+      await writing;
+      return { ...state };
+    },
+  };
+}
