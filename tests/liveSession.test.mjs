@@ -348,13 +348,30 @@ test('pausing while reconnecting is kept when the resume lands', async (t) => {
   }
 });
 
-test('pauseMic and resumeMic are no-ops unless live or reconnecting', async (t) => {
-  // Pins: nothing to pause before a session exists; no event, no stale flag.
-  const { events, session } = await setup(t);
-  session.pauseMic();
-  session.resumeMic();
-  assert.equal(session.micPaused, false);
-  assert.deepEqual(micEvents(events), []);
+test('pauseMic and resumeMic are no-ops in idle, connecting and error', async (t) => {
+  // Pins: a pause needs a live or reconnecting session. Pausing anywhere else
+  // sets no flag (a stale one would survive into the next live state) and emits no event.
+  const { gemini, events, session } = await setup(t, {}, { setupTimeoutMs: 60000 });
+  const inert = (where) => {
+    session.pauseMic();
+    session.resumeMic();
+    assert.equal(session.micPaused, false, where);
+    assert.deepEqual(micEvents(events), [], where);
+  };
+  inert('idle');
+
+  gemini.setConnectMode('silent');
+  const connecting = session.connect('gemini-3.8-live');
+  await gemini.session(0);
+  assert.equal(session.state, 'connecting');
+  inert('connecting');
+  session.disconnect();
+  await connecting;
+
+  gemini.setConnectMode('reject');
+  await session.connect('gemini-3.8-live');
+  assert.equal(session.state, 'error');
+  inert('error');
 });
 
 test('disconnect, a failed resume and a no-handle close all clear the pause', async (t) => {

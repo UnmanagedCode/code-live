@@ -26,7 +26,9 @@ test('base64 round-trips bytes and PCM', () => {
 });
 
 test('createChunker emits size-sample chunks and clear drops a partial one', () => {
-  // Pins: nothing captured during a pause leaks into the first chunk after resume.
+  // Pins: chunks are size-sample concatenations in push order, and clear() discards
+  // a partly filled chunk. (That the page calls clear() while paused is pinned by
+  // frontend-app.test.mjs.)
   const chunks = [];
   const c = createChunker(8, (all) => chunks.push([...all]));
   c.push(Float32Array.from([1, 2, 3]));
