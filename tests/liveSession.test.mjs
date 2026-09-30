@@ -19,7 +19,7 @@ async function setup(t, apiOverrides = {}, sessionOpts = {}) {
   await app.deps.keyStore.set(SENTINEL_KEY);
   const api = { ...createApi((u, o) => fetch(new URL(u, app.url + '/'), o)), ...apiOverrides };
   const events = [];
-  const session = createLiveSession({ api, onEvent: (e) => events.push(e), ...sessionOpts });
+  const session = createLiveSession({ api, onEvent: (e) => events.push(e), resumeDelayMs: 0, ...sessionOpts });
   t.after(async () => { session.disconnect(); await app.stop(); await host.close(); await gemini.close(); });
   return { gemini, host, app, api, events, session };
 }
@@ -154,8 +154,81 @@ test('repeated resume failures end in error', async (t) => {
   gemini.setConnectMode('reject');
   s0.send({ goAway: { timeLeft: '1s' } });
   await waitFor(() => session.state === 'error');
-  assert.equal(mints(gemini).length, 4, 'one connect + three resume attempts');
+  assert.equal(mints(gemini).length, 6, 'one connect + five resume attempts');
   assert.match(events.at(-1).detail, /resume/);
+});
+
+// Records every timer delay; resume waits fire at once, the setup timeout never does.
+function recordingTimers(setupTimeoutMs) {
+  const delays = [];
+  return {
+    delays,
+    timers: {
+      setTimeout: (fn, ms) => {
+        delays.push(ms);
+        if (ms === setupTimeoutMs) { const h = setTimeout(fn, ms); h.unref(); return h; }
+        return setTimeout(fn, 1);
+      },
+      clearTimeout: (h) => clearTimeout(h),
+    },
+  };
+}
+
+test('resume attempts are spaced out and survive a backend outage of a few seconds', async (t) => {
+  // Pins: a resume that meets a 503 from the backend (its restart backoff)
+  // waits resumeDelayMs * 2^(n-1) before the next attempt, and the call is
+  // live again on the original handle once the backend answers.
+  const { delays, timers } = recordingTimers(60000);
+  let real;
+  let resumeCalls = 0;
+  const { gemini, app, events, session } = await setup(t, {
+    mintToken: (model, h) => {
+      if (h && ++resumeCalls <= 2) return Promise.reject(new Error('HTTP 503'));
+      return real.mintToken(model, h);
+    },
+  }, { resumeDelayMs: 1000, setupTimeoutMs: 60000, timers });
+  real = createApi((u, o) => fetch(new URL(u, app.url + '/'), o));
+  await session.connect('gemini-3.8-live');
+  const s0 = await gemini.session(0);
+  s0.send({ sessionResumptionUpdate: { newHandle: 'h1', resumable: true } });
+  s0.send({ goAway: { timeLeft: '1s' } });
+  await gemini.session(1);
+  await waitFor(() => session.state === 'live' && states(events).includes('reconnecting'));
+  assert.equal(resumeCalls, 3, 'two rejected attempts, then one that went through');
+  assert.deepEqual(delays.filter((ms) => ms !== 60000), [1000, 2000]);
+  assert.deepEqual(mints(gemini)[1].body.bidiGenerateContentSetup.sessionResumption, { handle: 'h1' });
+  assert.deepEqual(states(events), ['connecting', 'live', 'reconnecting', 'live']);
+});
+
+test('disconnect during the wait between resume attempts stops the loop', async (t) => {
+  // Pins: a Disconnect while the resume loop waits ends in idle and the
+  // pending wait mints nothing when it fires.
+  // Resume waits are held until the test fires them; the setup timeout never fires.
+  const waits = [];
+  const timers = { setTimeout: (fn, ms) => { if (ms !== 15000) waits.push(fn); return 0; }, clearTimeout: () => {} };
+  let mintCalls = 0;
+  let real;
+  const { gemini, app, events, session } = await setup(t, {
+    mintToken: (model, h) => {
+      if (!h) return real.mintToken(model, h);
+      mintCalls++;
+      return Promise.reject(new Error('HTTP 503'));
+    },
+  }, { resumeDelayMs: 1000, timers });
+  real = createApi((u, o) => fetch(new URL(u, app.url + '/'), o));
+  await session.connect('gemini-3.8-live');
+  const s0 = await gemini.session(0);
+  s0.send({ sessionResumptionUpdate: { newHandle: 'h1', resumable: true } });
+  s0.send({ goAway: { timeLeft: '1s' } });
+  await waitFor(() => waits.length === 1);
+  assert.equal(mintCalls, 1, 'the first resume attempt ran, the second is waiting');
+  session.disconnect();
+  assert.equal(session.state, 'idle');
+  waits[0]();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(mintCalls, 1, 'the abandoned wait mints nothing');
+  assert.equal(session.state, 'idle');
+  assert.equal(states(events).at(-1), 'idle');
 });
 
 test('disconnect goes idle and closes the socket', async (t) => {
@@ -188,8 +261,8 @@ test('a stalled resume counts as a failed attempt', async (t) => {
   gemini.setConnectMode('silent');
   s0.send({ goAway: { timeLeft: '1s' } });
   await waitFor(() => session.state === 'error');
-  assert.equal(mints(gemini).length, 4, 'one connect + three timed-out resume attempts');
-  assert.equal(gemini.sessions.length, 4);
+  assert.equal(mints(gemini).length, 6, 'one connect + five timed-out resume attempts');
+  assert.equal(gemini.sessions.length, 6);
   assert.match(events.at(-1).detail, /did not complete setup/);
 });
 

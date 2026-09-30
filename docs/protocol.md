@@ -59,6 +59,7 @@ Each frame is `id: <boot>-<n>` / `event: <name>` / `data: <json>`. `<boot>` is r
   - A request with `Last-Event-ID` from this process gets every ring event after it.
   - A `Last-Event-ID` from a different process (other `<boot>`) gets the whole ring.
   - A request without `Last-Event-ID` gets no ring events.
+  - The id is read from the `Last-Event-ID` header, or, when the header is absent or empty, from the `lastEventId` query parameter (`GET api/events?lastEventId=<id>`). The page uses the query after it re-creates its EventSource, which cannot set a header. When both are sent, the header wins.
 - Keepalive is a `: ping` comment every 25 s.
 
 ## Tools

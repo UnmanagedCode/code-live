@@ -6,6 +6,7 @@ import { installSettings } from './settings.js';
 import { installTargetPicker } from './targetPicker.js';
 import { createLiveSession } from './liveSession.js';
 import { installAnnouncements } from './announcements.js';
+import { createEventStream } from './events.js';
 import { createPlayer } from './player.js';
 import { createSessionView } from './sessionView.js';
 import { installMicControl } from './micControl.js';
@@ -114,5 +115,5 @@ api.getModels()
   .catch((e) => transcript.add('error', `Loading models failed: ${e.message}`));
 targetPicker.load();
 
-const eventSource = new EventSource('api/events');
+const eventSource = createEventStream({ url: 'api/events' });
 installAnnouncements({ eventSource, transcript, session, targetPicker, hostIndicator });

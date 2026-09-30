@@ -4,5 +4,5 @@
   "version": "0.1.0",
   "pluginApi": 1,
   "backend": { "start": "node server.js", "healthPath": "/api/health" },
-  "frontend": { "path": "/", "navLabel": "Code Live" }
+  "frontend": { "path": "/", "navLabel": "Code Live", "keepAlive": true }
 }

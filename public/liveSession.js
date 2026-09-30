@@ -22,7 +22,8 @@ export function createLiveSession({
   api,
   WebSocketImpl = globalThis.WebSocket,
   onEvent = () => {},
-  maxResumeFailures = 3,
+  maxResumeFailures = 5,
+  resumeDelayMs = 1000,
   setupTimeoutMs = 15000,
   timers = { setTimeout: (...a) => setTimeout(...a), clearTimeout: (t) => clearTimeout(t) },
 }) {
@@ -109,6 +110,11 @@ export function createLiveSession({
     if (old) old.close(1000);
     let lastError = null;
     for (let failures = 0; failures < maxResumeFailures; failures++) {
+      if (failures > 0) {
+        // The backend may be restarting (the host answers 503 meanwhile): back off between attempts.
+        await new Promise((resolve) => timers.setTimeout(resolve, resumeDelayMs * 2 ** (failures - 1)));
+        if (gen !== generation) return;
+      }
       try {
         await open(gen, handle);
         if (gen !== generation) return;

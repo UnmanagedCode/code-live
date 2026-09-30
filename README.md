@@ -10,6 +10,7 @@ It is a code-conductor plugin: the host starts its backend and shows its page un
 - **Drive conductors by voice.** Gemini lists, creates, prompts and reads conductor sessions. Worker sessions are never listed, read or prompted.
 - **Hear replies as they finish.** When the **active target** conductor ends a turn, its last text reply is announced: shown in the transcript and, while connected, spoken by Gemini (long or code-heavy replies are summarized).
 - **Answer and approve by voice.** When the conductor stops on a question or a plan, Gemini reads the questions with their numbered options, or the plan, and you answer, approve or reject by speaking. Approval needs a spoken yes.
+- **Keep talking while you look elsewhere in code-conductor.** The call keeps running when you leave the Code Live view, and returning shows the same page.
 - **Pick the target** by voice (naming a session in a send switches to it, and Gemini says so) or with the target picker.
 
 Details: [docs/features.md](docs/features.md).
@@ -105,6 +106,7 @@ The backend exits with an error if `PROJECTS_ROOT` or `CONDUCTOR_URL` is missing
 - Gemini connections recycle about every 10 minutes. The client resumes with the latest handle (valid for 2 hours after a disconnect).
 - Ephemeral tokens are a `v1beta` preview feature of the Gemini API.
 - **`gemini-3.8-live-extended-thinking` tool calls are unreliable.** On the real API, with `thinkingLevel: "low"` and `NON_BLOCKING` functions, the server often never sends the `toolCall`, and the model then says a system error occurred. In a sample of 9 prompts asking for `list_conductor_sessions`, 2 got through. Other setups failed too: without `behavior`, without empty `parameters`, with a single tool, without the system prompt, and with `thinkingLevel` `medium` or `high` (every run failed). The other two models got the tool call every time. The picker labels this model `(tool calls unreliable)`, and its real smoke test checks only connection and spoken replies.
+- **The microphone can stay open with no Code Live UI on screen.** The page is kept alive when you leave its view, so Gemini keeps listening and can act on what it hears (approval still needs a spoken yes). The cues are `Code Live (running)` in code-conductor's switcher and the browser's recording indicator. Use **Pause mic** or **Disconnect** before leaving. Stop/Disable, or a Restart/Update from Settings → Plugins, ends the page and the call.
 - Use headphones: speaker audio can echo back into the microphone.
 - The key's last 4 characters are shown in Settings.
 

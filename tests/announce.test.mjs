@@ -130,6 +130,38 @@ test('a turn finished while the backend was down is announced at startup', async
   assert.equal(sse2.events.filter((e) => e.event === 'announce').length, 1);
 });
 
+test('?lastEventId= replays like the Last-Event-ID header, and the header wins when both are sent', async (t) => {
+  // Pins: a page whose EventSource was re-created after a 502/503 (it cannot
+  // set a header) still gets what it missed, from the query parameter; with
+  // both, the header's (newer) id decides.
+  const host = await startFakeHost({ instances: [CONDUCTOR_A] });
+  const first = await startApp({ host });
+  await first.deps.service.setTarget('cond-a');
+  const sse1 = sseClient(`${first.url}/api/events`);
+  await sse1.ready;
+  first.deps.sse.publish('marker', {});
+  const oldBootId = (await sse1.next('marker')).id;
+  sse1.close();
+  await first.stop({ keepRoot: true });
+
+  host.finishTurn('cond-a', 'during the restart', { notify: false });
+  const second = await startApp({ host, projectsRoot: first.root });
+  t.after(async () => { await second.stop(); await host.close(); });
+  const viaQuery = sseClient(`${second.url}/api/events?lastEventId=${encodeURIComponent(oldBootId)}`);
+  t.after(() => viaQuery.close());
+  await viaQuery.ready;
+  assert.equal((await viaQuery.next('announce')).data.text, 'during the restart');
+  const startupId = viaQuery.events.find((e) => e.event === 'announce').id;
+
+  // The header's id (this boot, already past the announcement) outranks the query's old-boot id.
+  const both = sseClient(`${second.url}/api/events?lastEventId=${encodeURIComponent(oldBootId)}`, { lastEventId: startupId });
+  t.after(() => both.close());
+  await both.ready;
+  second.deps.sse.publish('marker', {});
+  await both.next('marker');
+  assert.deepEqual(both.events.filter((e) => e.event === 'announce'), []);
+});
+
 test('Last-Event-ID replays only what was missed; a fresh page gets none', async (t) => {
   const { host, app, sse } = await setup(t);
   host.finishTurn('cond-a', 'one');

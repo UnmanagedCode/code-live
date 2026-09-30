@@ -19,7 +19,7 @@ User-facing behavior of the Code Live page and its voice tools. Wire shapes are 
 - Gemini's audio plays back gaplessly. When Gemini reports it was **interrupted** (you talked over it), queued audio is dropped.
 - If Gemini accepts the socket but doesn't finish the handshake (`setupComplete`) within 15 s, the attempt is abandoned: Connect ends in `error` with `Gemini did not complete setup within 15 s`, and a stalled resume counts as one failed attempt.
 - **Disconnect** closes the session, stops the microphone and returns to `idle`. It is enabled while `connecting` and `reconnecting` too, and abandons the attempt in progress.
-- When Gemini announces a connection end (`goAway`, about every 10 minutes) or the socket drops unexpectedly, the page shows `reconnecting` and resumes the same conversation on a fresh token. After 3 failed attempts in a row, or with no resumption handle yet, it goes to `error`; press **Connect** to start over.
+- When Gemini announces a connection end (`goAway`, about every 10 minutes) or the socket drops unexpectedly, the page shows `reconnecting` and resumes the same conversation on a fresh token. Attempts are spaced out (`resumeDelayMs` doubling: 1, 2, 4, 8 s) so a resume that meets a restarting backend still gets through; after `maxResumeFailures` (5) failed attempts in a row, or with no resumption handle yet, it goes to `error`; press **Connect** to start over.
 - Without a stored key, Connect fails with `No Gemini API key is set; add one in Settings`.
 
 ## Pausing the microphone
@@ -75,3 +75,13 @@ When the active conductor ends a turn on a question or a plan, the announcement 
 - While that conductor stays the target, a question or plan that is still waiting is announced once, even if the conductor has run other turns since.
 - These work only while the conductor is actually waiting. Once it has been answered (here or in the code-conductor UI), a further answer or decision is refused.
 - They act on the active target only, and depend on the host's `/mcp` endpoint (see the README's known limitations).
+
+## Leaving the page
+
+The manifest sets `frontend.keepAlive`, so code-conductor keeps the Code Live page loaded in its own frame while you are in another view. Coming back shows the same page, with no reload.
+
+- **A live call keeps running** while you are elsewhere in code-conductor: the microphone stays open, Gemini keeps listening, and conductor announcements are still spoken.
+- **Gemini can act on what the open microphone hears** (send prompts; an approval still needs a spoken yes, which can be overheard) while no Code Live UI is on screen. The code-conductor switcher shows `Code Live (running)` and the browser shows its recording indicator. Use **Pause mic** or **Disconnect** before leaving if that is not wanted.
+- **A call that ends while the page is hidden** (resume attempts exhausted, Gemini closing the socket) goes to `error` and stops the microphone. The `error` pill and a transcript line are there when you return.
+- **What ends the page:** Stop or Disable of the plugin, a Restart or Update from Settings → Plugins, a version switch, or reloading the browser tab. The call ends with it.
+- **A backend restart does not end the call.** The Gemini socket does not go through the backend. The page's event stream reconnects by itself (retrying with a growing delay while the host answers 502/503), announcements made while the backend was down are replayed, and a tool call made in that window returns `CLIENT_ERROR` to Gemini. A Gemini resume in that window waits and retries (see Connecting).
