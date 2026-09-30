@@ -48,7 +48,7 @@ The catalog, per-model settings and the picker hints (the `hint` field) live in 
 
 | tool | args | does |
 |---|---|---|
-| `list_conductor_sessions` | none | lists live conductor sessions (`GET /api/instances`, `project === ".conduct"`), with the active one marked |
+| `list_conductor_sessions` | none | lists live conductor sessions (`GET /api/instances`, `project === ".conduct"`), with each one's run state (`on a worker` while it waits on a worker; [mapping](docs/protocol.md#tool-results)) and the active one marked |
 | `create_conductor_session` | none | ensures `.conduct` and spawns a conductor, then makes it the active target |
 | `send_to_conductor` | `text`, optional `session` (id or exact title) | prompts over the host `/ws`; a named session becomes the active target (`activeTargetChanged`) |
 | `read_conductor_messages` | optional `session`, optional `count` (1–10, default 1) | the last `count` assistant text messages; never changes the target |

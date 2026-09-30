@@ -76,7 +76,14 @@ An omitted `session` (or one that is empty or whitespace) means the active targe
 
 ### Tool results
 
-A session summary is `{sessionId, title, status, lastResponseAt}`. `title` is the instance title, else the first prompt cut to 60 chars (`…` suffix), else `Untitled conductor`.
+A session summary is `{sessionId, title, status, lastResponseAt}`. `status` is the host's run state, derived from the `GET /api/instances` row fields `status`, `displayStatus` and `awaitingWake` (`summarize` in `src/hostEvents.js`); the target picker shows the same value. `title` is the instance title, else the first prompt cut to 60 chars (`…` suffix), else `Untitled conductor`.
+
+| host row | reported `status` |
+|---|---|
+| `idle`, `displayStatus` `idle` or absent, `awaitingWake` false | `idle`: nothing is in flight |
+| `idle`, `displayStatus` `idle`, `awaitingWake` true | `on a worker`: the host's own label for a conductor waiting on a worker |
+| `idle`, `displayStatus` `running` (background subagents), any `awaitingWake` | `running` |
+| `turn`, `spawning`, `exited`, `crashed`, any `awaitingWake` | unchanged |
 
 | tool | success |
 |---|---|

@@ -125,6 +125,6 @@ export function sseClient(url, { lastEventId } = {}) {
   };
 }
 
-export const CONDUCTOR_A = { id: 'cond-a', project: '.conduct', sessionId: 's-a', status: 'idle', title: 'Alpha plan', firstPrompt: 'plan alpha', lastResponseAt: 1, createdAt: 1 };
+export const CONDUCTOR_A = { id: 'cond-a', project: '.conduct', sessionId: 's-a', status: 'idle', displayStatus: 'idle', activeAgentTasks: 0, awaitingWake: false, title: 'Alpha plan', firstPrompt: 'plan alpha', lastResponseAt: 1, createdAt: 1 };
 export const CONDUCTOR_B = { id: 'cond-b', project: '.conduct', sessionId: 's-b', status: 'turn', title: '', firstPrompt: 'Build the beta release pipeline and report back on everything that happened', lastResponseAt: 2, createdAt: 2 };
 export const WORKER = { id: 'worker-1', project: 'code-live', sessionId: 's-w', status: 'idle', title: 'Alpha plan', firstPrompt: 'do work', lastResponseAt: 3, createdAt: 3 };
