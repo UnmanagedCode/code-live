@@ -210,9 +210,10 @@ test('a resume while getUserMedia is pending starts no second capture', async ()
 });
 
 test('disconnect while getUserMedia is pending releases the capture once it resolves, and the next connect starts a fresh one', async () => {
-  // Pins: a stop that lands mid-start leaks nothing and does not wedge later starts.
-  // Counterfactual: if the abandoned start still adopts its capture, the track
-  // stays live on an idle page and the next Connect finds a mic and starts none.
+  // Pins: a stop that lands mid-start leaks nothing, builds no node, and does not
+  // wedge later starts. Counterfactual: if the abandoned start still adopts its
+  // capture, the track stays live on an idle page and the next Connect finds a
+  // mic and starts none.
   const d = deferred(fakeStream);
   gum = () => d.promise;
   const mics = nodes.length;
@@ -222,18 +223,17 @@ test('disconnect while getUserMedia is pending releases the capture once it reso
 
   d.resolve(fakeStream());
   await waitFor(() => streams.length > before && streams.at(-1).tracks[0].stopped, { what: 'abandoned track stopped' });
-  assert.equal(nodes.length - mics, 1);
-  assert.equal(nodes.at(-1).port.onmessage, null);
-  assert.equal(nodes.at(-1).disconnected, true);
+  assert.equal(nodes.length - mics, 0, 'the abandoned start builds no node');
 
   gum = defaultGum;
-  const { node } = await connectLive();
-  assert.notEqual(node, nodes[mics]);
+  await connectLive();
+  assert.equal(nodes.length - mics, 1);
 });
 
 test('disconnect while the worklet module loads stops the track once it resolves', async () => {
-  // Pins: a stop landing between getUserMedia and the node build still releases
-  // the stream. Counterfactual: a start that ignores the stop keeps the track live.
+  // Pins: a stop landing between getUserMedia and the node build releases the
+  // stream and the start builds no node. Counterfactual: a start that ignores the
+  // stop keeps the track live and builds a node on an idle page.
   const d = deferred();
   loadModule = () => d.promise;
   const mics = nodes.length;
@@ -245,9 +245,22 @@ test('disconnect while the worklet module loads stops the track once it resolves
 
   d.resolve();
   await waitFor(() => streams.length > before && streams.at(-1).tracks[0].stopped, { what: 'track stopped' });
-  assert.equal(nodes.length - mics, 1);
-  assert.equal(nodes.at(-1).port.onmessage, null);
-  assert.equal(nodes.at(-1).disconnected, true);
+  assert.equal(nodes.length - mics, 0, 'the abandoned start builds no node');
+});
+
+test('disconnect while the worklet module never loads stops the track without waiting for it', async () => {
+  // Pins: once Disconnect runs, every track a start already acquired is stopped
+  // at once, whether or not that start ever settles. Counterfactual: a stop that
+  // can only release a finished capture leaves the microphone indicator on for as
+  // long as the load stays pending.
+  loadModule = () => new Promise(() => {});
+  const modules = moduleCalls;
+  const before = streams.length;
+  await connectPending();
+  await waitFor(() => moduleCalls > modules, { what: 'worklet load started' });
+  assert.equal(streams.length - before, 1);
+  $('disconnect').click();
+  assert.equal(streams.at(-1).tracks[0].stopped, true);
 });
 
 test('a rejected getUserMedia reports the error and the next live starts the mic', async () => {

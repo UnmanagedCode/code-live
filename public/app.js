@@ -55,25 +55,27 @@ function onEvent(ev) {
 
 // One capture per session: `mic` is claimed before the first await, so a
 // 'live' that lands while a start is pending (a resume) starts nothing. A
-// start that stopMic abandoned releases its capture as soon as it settles.
+// start that stopMic abandoned stops what it acquired and builds nothing.
 function startMic() {
   const claim = { stop: null };
   mic = claim;
-  openMic().then(
-    (stop) => { if (mic === claim) claim.stop = stop; else stop(); },
-    (e) => {
-      if (mic === claim) mic = null;
-      transcript.add('error', `Microphone: ${e.message}`);
-    },
-  );
+  openMic(claim).catch((e) => {
+    if (mic === claim) mic = null;
+    transcript.add('error', `Microphone: ${e.message}`);
+  });
 }
 
-// Resolves with the function that releases the capture. A failure after
-// getUserMedia stops the stream before rejecting.
-async function openMic() {
+// Sets `claim.stop` to a release of everything acquired so far, as soon as
+// something is acquired, so stopMic never waits for a pending step. A failure
+// after getUserMedia stops the stream before rejecting.
+async function openMic(claim) {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
+  const stopTracks = () => { for (const t of stream.getTracks()) t.stop(); };
+  claim.stop = stopTracks;
   try {
+    if (mic !== claim) { stopTracks(); return; }
     await audioCtx.audioWorklet.addModule('mic-worklet.js');
+    if (mic !== claim) { stopTracks(); return; }
     const source = audioCtx.createMediaStreamSource(stream);
     const node = new AudioWorkletNode(audioCtx, 'pcm-capture');
     const want = Math.round(audioCtx.sampleRate * CHUNK_SECONDS);
@@ -81,14 +83,14 @@ async function openMic() {
     // A pause keeps the mic open but discards what it captures.
     node.port.onmessage = ({ data }) => (session.micPaused ? chunker.clear() : chunker.push(data));
     source.connect(node);
-    return () => {
+    claim.stop = () => {
       node.port.onmessage = null;
       source.disconnect();
       node.disconnect();
-      for (const t of stream.getTracks()) t.stop();
+      stopTracks();
     };
   } catch (e) {
-    for (const t of stream.getTracks()) t.stop();
+    stopTracks();
     throw e;
   }
 }
