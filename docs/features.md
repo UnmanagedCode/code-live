@@ -58,7 +58,7 @@ Failures come back to Gemini as `ok:false` with a code, and Gemini explains them
   - `create_conductor_session`;
   - the target picker.
 - `read_conductor_messages` never changes it.
-- When the target changes, turns the session had already finished are marked as handled, so only new turns are announced. A question or plan that session is still waiting on is not a finished turn: it is announced once as the switch happens.
+- When the target changes, turns the session had already finished are marked as handled, so only new turns are announced. A question or plan that session is still waiting on is not a finished turn: it is announced as the switch happens. Switching back to a conductor still waiting on the same question or plan repeats it, as a reminder.
 - When the active target finishes a turn, its last text reply appears in the transcript as a **Conductor · `<title>`** entry. While the session is `live` (including while the mic is paused), it is also sent to Gemini as `CONDUCTOR UPDATE from "<title>":` followed by the text. Gemini reads a short reply in full and summarizes a long or code-heavy one. A turn with no text reply is announced as `(turn finished with no text reply)`. Replies are cut at 4000 characters.
 - An announcement that ends on a question or plan has `· question` or `· plan` after the title in its transcript label, and a final line for Gemini (`AWAITING ANSWER` or `AWAITING PLAN APPROVAL`) that is not shown in the transcript.
 - An announcement arriving while the session is not live stays in the transcript only; it is not spoken later.
@@ -68,10 +68,10 @@ Failures come back to Gemini as `ok:false` with a code, and Gemini explains them
 
 When the active conductor ends a turn on a question or a plan, the announcement includes it, and Gemini acts on it.
 
-- **Questions:** Gemini reads each question with its numbered options and asks you. A very long set of questions is shortened to fit: option descriptions first, then long labels, and if that is still not enough some trailing options are left out. Gemini says which, and option numbers still work. Answer with the option number or its words (`the second`, `sqlite`). A multi-select question takes several options, a question can be answered with your own words instead, and a remark can go along with a choice. Skipped questions are left unanswered. If an option can't be matched, Gemini reads the options back and asks again.
+- **Questions:** Gemini reads each question with its numbered options and asks you. A very long set of questions is shortened to fit: option descriptions first, then long labels, and if that is still not enough some trailing options are left out. Gemini says so, and option numbers still work. Answer with the option number or its words (`the second`, `sqlite`). A multi-select question takes several options, a question can be answered with your own words instead, and a remark can go along with a choice. Skipped questions are left unanswered. If an option can't be matched, Gemini reads the options back and asks again.
 - **Plans:** Gemini summarizes the plan and asks whether to approve or reject it.
   - **Approve:** Gemini first says that approving lets the conductor run without permission prompts, and waits for an explicit yes. The confirmation is enforced by Gemini's instructions and the tool's `confirmed` flag, not checked against your speech. It guards against a misheard utterance and is not a security boundary: conductor-written text reaches Gemini and could itself prompt an approval, which grants nothing a conductor cannot already do through the open host API.
   - **Reject:** say what to change. The conductor stays in plan mode and revises the plan.
-- A question or plan that is still waiting is announced once even if the conductor has run other turns since.
+- While that conductor stays the target, a question or plan that is still waiting is announced once, even if the conductor has run other turns since.
 - These work only while the conductor is actually waiting. Once it has been answered (here or in the code-conductor UI), a further answer or decision is refused.
 - They act on the active target only, and depend on the host's `/mcp` endpoint (see the README's known limitations).

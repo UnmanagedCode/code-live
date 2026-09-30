@@ -81,7 +81,7 @@ Everything lives under `$PROJECTS_ROOT/.code-live/` (directory mode 0700). The p
 
 ## Announcer
 
-Reconciling is the only path that announces. A turn is idempotent by its `_seq` together with the msgId of its last assistant message, and a pending question or plan by its `tool_use` id (`lastHandledAskId`). Events with `parentToolUseId` (sub-agents) never count as turns or messages, matching the host:
+Reconciling is the only path that announces. A turn is idempotent by its `_seq` together with the msgId of its last assistant message, and a pending question or plan, while that conductor stays the target, by its `tool_use` id (`lastHandledAskId`). Events with `parentToolUseId` (sub-agents) never count as turns or messages, matching the host:
 
 1. It confirms the persisted target is a live conductor row in `GET /api/instances`. A missing row or a non-`.conduct` row clears the target (SSE `target: null`), so a worker is never announced. If the host is unreachable, it logs and stops.
 2. It reads the target's trailing 500 events. A `lastSeq` below `lastHandledTurnSeq` means the host reset the ring (rewind, prune, respawn), so the handled seq counts as `-1` for this pass.
@@ -113,7 +113,7 @@ Duplicate triggers therefore never double-announce, and a turn missed during a d
 
 **Serialization:**
 - Reconciles, `baseline(id, seq?)` (a target switch) and `clear()` share one promise chain, so a reconcile for the old target cannot overwrite a new baseline.
-- `baseline` marks every turn the session has already finished as handled (`-1` for a freshly created conductor), so switching targets never announces old turns. It does not mark an ask as handled: `lastHandledAskId` is cleared (kept when the same target is picked again), and once the switch is stored it queues an ask-only reconcile, so a question or plan the row still shows as unanswered is announced once when its conductor becomes the target.
+- `baseline` marks every turn the session has already finished as handled (`-1` for a freshly created conductor), so switching targets never announces old turns. It does not mark an ask as handled: `lastHandledAskId` is cleared (kept when the same target is picked again), and once the switch is stored it queues an ask-only reconcile, so a question or plan the row still shows as unanswered is announced when its conductor becomes the target. Switching back to a conductor still waiting on the same question or plan repeats it, as a reminder; only re-picking the current target keeps the record.
 - `send` awaits the switch (baseline included) **before** it sends the prompt. Otherwise a fast turn could end before the baseline and be marked handled unannounced. The test `a turn that ends right after a switching send is still announced` pins this ordering.
 
 **Restart replay:**
