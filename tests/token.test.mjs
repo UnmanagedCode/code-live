@@ -31,7 +31,7 @@ test('GET /api/models lists id, label and any hint', async (t) => {
   assert.deepEqual(r.json, {
     models: [
       { id: 'gemini-3.8-live', label: 'Gemini 3.8 Live' },
-      { id: 'gemini-3.8-live-extended-thinking', label: 'Gemini 3.8 Live Extended Thinking', hint: 'tool calls unreliable' },
+      { id: 'gemini-3.8-live-extended-thinking', label: 'Gemini 3.8 Live Extended Thinking', hint: 'tool calls usually fail' },
       { id: 'gemini-3.1-flash-live-preview', label: 'Gemini 3.1 Flash Live Preview' },
     ],
   });
