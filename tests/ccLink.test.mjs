@@ -127,6 +127,24 @@ test('turn_notification frames are re-emitted', async (t) => {
   assert.equal(seen[0].id, 'c1');
 });
 
+test('instances frames are re-emitted; other frame types are still ignored', async (t) => {
+  const srv = await startWs();
+  const link = makeLink(srv.port);
+  t.after(async () => { link.stop(); await srv.close(); });
+  const instances = [];
+  const turns = [];
+  link.on('instances', (f) => instances.push(f));
+  link.on('turn_notification', (f) => turns.push(f));
+  link.start();
+  await waitFor(() => link.isOpen());
+  srv.send({ t: 'status', id: 'c1' });
+  srv.send({ t: 'instances', instances: [{ id: 'c1' }] });
+  srv.send({ t: 'instances' });
+  await waitFor(() => instances.length === 2);
+  assert.deepEqual(instances[0], { t: 'instances', instances: [{ id: 'c1' }] });
+  assert.deepEqual(turns, []);
+});
+
 test('pending prompts reject HOST_DISCONNECTED on drop; closed rejects at once', async (t) => {
   const srv = await startWs();
   const link = makeLink(srv.port, { baseDelayMs: 1000, maxDelayMs: 1000 });

@@ -42,7 +42,10 @@ Gemini decides when to call these; each call and its result appear in the transc
 | `list_conductor_sessions` | the live conductor sessions with each one's run state, and which one is active; worker sessions never appear |
 | `create_conductor_session` | starts a new conductor and makes it the active target. It takes no prompt: Gemini follows up with `send_to_conductor` |
 | `send_to_conductor` | sends your words to a conductor. Without a session it goes to the active target. With one (an id, or an exact title in any case), that session becomes the active target and Gemini says which one. The reply comes later as an announcement |
-| `read_conductor_messages` | reads back the last 1–10 assistant text messages of a session (active target by default) without changing the target |
+| `read_conductor_messages` | reads back the latest assistant message of a session (active target by default) together with the plan or questions its turn ended on, without changing the target. With a `count` (1–10) it reads back exactly that many messages |
+| `answer_conductor_question` | answers the questions the active conductor is waiting on |
+| `approve_conductor_plan` | approves the plan the active conductor is waiting on, after a spoken yes |
+| `reject_conductor_plan` | rejects that plan, with feedback, so the conductor revises it |
 
 A title matches the name shown in the picker: the session title, else the first 60 characters of its first prompt, else `Untitled conductor`. A title shared by several conductors is refused as ambiguous, and Gemini asks for the id.
 
@@ -55,7 +58,20 @@ Failures come back to Gemini as `ok:false` with a code, and Gemini explains them
   - `create_conductor_session`;
   - the target picker.
 - `read_conductor_messages` never changes it.
-- When the target changes, turns the session had already finished are marked as handled, so only new turns are announced.
+- When the target changes, turns the session had already finished are marked as handled, so only new turns are announced. A question or plan that session is still waiting on is not a finished turn: it is announced as the switch happens. Switching back to a conductor still waiting on the same question or plan repeats it, as a reminder.
 - When the active target finishes a turn, its last text reply appears in the transcript as a **Conductor · `<title>`** entry. While the session is `live` (including while the mic is paused), it is also sent to Gemini as `CONDUCTOR UPDATE from "<title>":` followed by the text. Gemini reads a short reply in full and summarizes a long or code-heavy one. A turn with no text reply is announced as `(turn finished with no text reply)`. Replies are cut at 4000 characters.
+- An announcement that ends on a question or plan has `· question` or `· plan` after the title in its transcript label, and a final line for Gemini (`AWAITING ANSWER` or `AWAITING PLAN APPROVAL`) that is not shown in the transcript.
 - An announcement arriving while the session is not live stays in the transcript only; it is not spoken later.
 - If the active target's session disappears from code-conductor, the target is cleared and the picker shows `— no active conductor —`.
+
+## Answering and approving by voice
+
+When the active conductor ends a turn on a question or a plan, the announcement includes it, and Gemini acts on it.
+
+- **Questions:** Gemini reads each question with its numbered options and asks you. A very long set of questions is shortened to fit: option descriptions first, then long labels, and if that is still not enough some trailing options are left out. Gemini says so, and option numbers still work. Answer with the option number or its words (`the second`, `sqlite`). A multi-select question takes several options, a question can be answered with your own words instead, and a remark can go along with a choice. Skipped questions are left unanswered. If an option can't be matched, Gemini reads the options back and asks again.
+- **Plans:** Gemini summarizes the plan and asks whether to approve or reject it.
+  - **Approve:** Gemini first says that approving lets the conductor run without permission prompts, and waits for an explicit yes. The confirmation is enforced by Gemini's instructions and the tool's `confirmed` flag, not checked against your speech. It guards against a misheard utterance and is not a security boundary: conductor-written text reaches Gemini and could itself prompt an approval, which grants nothing a conductor cannot already do through the open host API.
+  - **Reject:** say what to change. The conductor stays in plan mode and revises the plan.
+- While that conductor stays the target, a question or plan that is still waiting is announced once, even if the conductor has run other turns since.
+- These work only while the conductor is actually waiting. Once it has been answered (here or in the code-conductor UI), a further answer or decision is refused.
+- They act on the active target only, and depend on the host's `/mcp` endpoint (see the README's known limitations).
