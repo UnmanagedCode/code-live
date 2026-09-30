@@ -36,7 +36,7 @@ browser (Code Live page)                       code-live backend (node:http)    
 | `src/answerMapping.js` | pure: `resolveAnswers` / `remapQuestion` map spoken choices to the host's exact labels; `describeAnswers` |
 | `src/hostEvents.js` | helpers shared by the service and announcer: `isConductor`, `summarize`, `assistantText`, `truncate`, `truncateBody`, `toolAsk`, `newestTurnEnd`, `lastAssistantMsgId`, `latestAskEvent`, `askTurnEnd`, `askId`, `renderQuestions`, `renderPlan`, `MAX_TEXT` |
 | `src/conductor.js` | the conductor service behind both the tools and the UI routes: `list`, `create`, `send`, `read`, `answer`, `approve`, `reject`, `resolve`, `setTarget`, `clearTarget`, `getTarget` |
-| `src/announcer.js` | turn-end reconciliation → SSE `announce`; target baselines |
+| `src/announcer.js` | turn-end reconciliation → SSE `announce`; target baselines. `reconcileLogged()` is the entry for triggers with no caller to reject to (`turn_notification`, `open`, `instances`, startup, baseline): a failure is logged, never an unhandled rejection |
 | `src/sse.js` | SSE hub: boot-scoped ids, a 20-event replay ring, keepalive |
 | `src/http.js` | security headers, JSON body reading, the static allowlist |
 | `src/routes.js` | `ROUTES`, the HTTP API table |
@@ -98,8 +98,8 @@ A 404 clears the target (SSE `target: null`); other errors are logged.
 **Content** comes from `hostMcp.recentMessages(row.sessionId)`:
 - `text` is the returned bodies joined with newlines, so a turn's plan or questions are included. `ask` is `{kind:"question", count}` or `{kind:"plan", planPath}` when an unannounced ask ended this turn, else `null`.
 - The text is used only if the newest returned message has the turn's `msgId`. Otherwise (a later turn has already spoken, the read failed, or the row has no `sessionId` yet) the turn's last assistant text from the events is used, and the reason is logged.
-- Either way, if the ask's section is missing from the text it is rendered from the ask's own event in the host's fence format, so the ask is never dropped.
-- Over 4000 characters, `truncateBody` keeps a trailing `--- questions ---` section whole and cuts the prose before it. A section that alone exceeds the limit is shortened line by line (descriptions before labels) and `ask.truncated` is set; anything else is cut from the end. Answering maps choices against the untruncated `user_question` event.
+- Either way, if the ask's section is missing from the text it is rendered from the ask's own event in the host's fence format, so the ask is never dropped. The renderers treat non-string or missing fields of the host payload as empty, so a malformed event cannot throw.
+- Over 4000 characters, `truncateBody` keeps a trailing `--- questions ---` section whole and cuts the prose before it. A section that alone exceeds the limit is shortened line by line (lines capped at 160, 80, 40 then 20 chars, so descriptions go first but a long label is cut too) and `ask.truncated` is set. If that is not enough, trailing lines are dropped whole, a `… N more line(s) not shown` line ends the section and `ask.dropped` is set. Anything else is cut from the end. Answering maps choices against the untruncated `user_question` event.
 
 **Triggers:**
 - a `turn_notification` whose `id` is the active target;
@@ -113,7 +113,7 @@ Duplicate triggers therefore never double-announce, and a turn missed during a d
 
 **Serialization:**
 - Reconciles, `baseline(id, seq?)` (a target switch) and `clear()` share one promise chain, so a reconcile for the old target cannot overwrite a new baseline.
-- `baseline` marks every turn the session has already finished, and a question or plan it ended on, as handled (`-1` for a freshly created conductor), so switching targets never announces old turns.
+- `baseline` marks every turn the session has already finished as handled (`-1` for a freshly created conductor), so switching targets never announces old turns. It does not mark an ask as handled: `lastHandledAskId` is cleared (kept when the same target is picked again), and once the switch is stored it queues an ask-only reconcile, so a question or plan the row still shows as unanswered is announced once when its conductor becomes the target.
 - `send` awaits the switch (baseline included) **before** it sends the prompt. Otherwise a fast turn could end before the baseline and be marked handled unannounced. The test `a turn that ends right after a switching send is still announced` pins this ordering.
 
 **Restart replay:**

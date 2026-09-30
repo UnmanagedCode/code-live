@@ -85,7 +85,7 @@ export function resolveAnswers(questions, spoken) {
   }
   const answers = [];
   for (let i = 0; i < questions.length; i++) {
-    const labels = (questions[i]?.options ?? []).map((o) => o.label);
+    const labels = (Array.isArray(questions[i]?.options) ? questions[i].options : []).map((o) => (typeof o?.label === 'string' ? o.label : ''));
     const r = resolveEntry(given[i], i + 1, labels, !!questions[i]?.multiSelect);
     if (r.refusal) return r;
     answers.push(r.answer);

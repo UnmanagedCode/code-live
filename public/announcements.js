@@ -7,7 +7,9 @@ export const ASK_PLAN_MARK = 'AWAITING PLAN APPROVAL';
 // The line that ends an update whose turn stopped on a question or plan.
 function askFooter(ask) {
   if (ask?.kind === 'question') {
-    const cut = ask.truncated ? ' Some options above were shortened: say so, and let the user pick by option number.' : '';
+    let cut = '';
+    if (ask.dropped) cut = ' Some options are missing from the text above: say so, and let the user pick by option number.';
+    else if (ask.truncated) cut = ' Some options above were shortened: say so, and let the user pick by option number.';
     return `${ASK_QUESTION_MARK}: ${ask.count} question(s). Use answer_conductor_question.${cut}`;
   }
   if (ask?.kind === 'plan') return `${ASK_PLAN_MARK}${ask.planPath ? ` (plan file: ${ask.planPath})` : ''}.`;

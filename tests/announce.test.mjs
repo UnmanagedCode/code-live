@@ -489,14 +489,46 @@ test('a second ask after the first was announced is announced too', async (t) =>
   assert.equal(announces(sse).length, 2);
 });
 
-test('an ask the session already ended on when it became the target is not announced', async (t) => {
+test('switching to a conductor already blocked on an ask announces that ask once, but not its old turns', async (t) => {
   const { host, app, sse } = await setup(t);
-  host.finishAsk('cond-b', { kind: 'question', questions: QUESTIONS, notify: false, frames: false });
+  host.finishTurn('cond-b', 'old news', { notify: false });
+  const askEnd = host.finishAsk('cond-b', { kind: 'question', questions: QUESTIONS, prose: 'Blocked on you.', notify: false, frames: false });
   await app.deps.service.setTarget('cond-b');
-  assert.equal(app.deps.state.get().lastHandledAskId, 'tu1');
-  host.broadcast({ t: 'instances', instances: host.state.instances });
+  const ev = await sse.next('announce');
+  assert.equal(ev.data.sessionId, 'cond-b');
+  assert.equal(ev.data.turnSeq, askEnd._seq);
+  assert.deepEqual(ev.data.ask, { kind: 'question', count: 2 });
+  assert.match(ev.data.text, /^Blocked on you\.\n--- questions ---/);
+  // Re-picking the same target and every further trigger add nothing.
+  await app.deps.service.setTarget('cond-b');
   await app.deps.announcer.reconcileAsk();
   await app.deps.announcer.reconcile();
+  await settle(app, sse);
+  const all = announces(sse);
+  assert.equal(all.length, 1);
+  assert.ok(all.every((a) => !a.text.includes('old news')), 'finished turns are not replayed on a switch');
+});
+
+test('an ask that landed on a conductor while another was the target is announced when you switch back to it', async (t) => {
+  const { host, app, sse } = await setup(t);
+  await app.deps.service.setTarget('cond-b');
+  host.finishAsk('cond-a', { kind: 'plan', plan: 'Step 1', planPath: '/plans/a.md', notify: false, frames: false });
+  await app.deps.announcer.reconcile();
+  await settle(app, sse);
+  assert.deepEqual(announces(sse), [], 'not the target: silent');
+  await app.deps.service.setTarget('cond-a');
+  const ev = await sse.next('announce');
+  assert.equal(ev.data.sessionId, 'cond-a');
+  assert.deepEqual(ev.data.ask, { kind: 'plan', planPath: '/plans/a.md' });
+  assert.equal(announces(sse).length, 1);
+});
+
+test('an ask that was answered before the switch is not announced', async (t) => {
+  const { host, app, sse } = await setup(t);
+  host.finishAsk('cond-b', { kind: 'question', questions: QUESTIONS, notify: false, frames: false });
+  host.setRow('cond-b', { awaitingUser: null, awaitingUserSource: null });
+  await app.deps.service.setTarget('cond-b');
+  await app.deps.announcer.reconcileAsk();
   await settle(app, sse);
   assert.deepEqual(announces(sse), []);
 });
@@ -591,4 +623,68 @@ test('a questions section that fits is not flagged', async (t) => {
   const { host, sse } = await setup(t);
   host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, prose: 'word '.repeat(2000) });
   assert.deepEqual((await sse.next('announce')).data.ask, { kind: 'question', count: 2 });
+});
+
+// ---- unhandled rejections ----
+
+// Collects process-level unhandled rejections for the test's duration.
+function watchRejections(t) {
+  const seen = [];
+  const on = (e) => seen.push(e);
+  process.on('unhandledRejection', on);
+  t.after(() => process.off('unhandledRejection', on));
+  return seen;
+}
+const ticks = async () => { for (let i = 0; i < 3; i++) await new Promise((r) => setImmediate(r)); };
+
+test('a malformed user_question payload is announced without throwing or rejecting unhandled', async (t) => {
+  const { host, sse } = await setup(t);
+  const rejections = watchRejections(t);
+  t.mock.method(console, 'error', () => {});
+  // The event is what the announcer renders when the host's own rendering is unavailable.
+  host.setMcp('get_recent_messages', () => ({ content: [{ type: 'text', text: 'unavailable' }], isError: true }));
+  host.finishAsk('cond-a', { kind: 'question', questions: [{ question: 'Pick?', options: [null, { label: 'A' }, 7] }, null], prose: 'Odd payload.' });
+  const ev = await sse.next('announce');
+  assert.deepEqual(ev.data.ask, { kind: 'question', count: 2 });
+  assert.match(ev.data.text, /^Odd payload\.\n--- questions ---\n1\. Pick\? \(multiSelect: false\)\n {3}- \n {3}- A\n {3}- \n2\. {2}\(multiSelect: false\)$/);
+  await ticks();
+  assert.deepEqual(rejections, []);
+});
+
+test('a reconcile that throws is logged by every trigger, never left unhandled', async (t) => {
+  const { host, app } = await setup(t);
+  const rejections = watchRejections(t);
+  const logged = t.mock.method(console, 'error', () => {});
+  app.deps.state.update = async () => { throw new Error('disk full'); };
+  const failures = () => logged.mock.calls.filter((c) => c.arguments[0] === 'code-live: reconcile failed:' && c.arguments[1] === 'disk full').length;
+  // turn_notification
+  host.finishTurn('cond-a', 'first');
+  await waitFor(() => failures() >= 1, { what: 'a logged failure for turn_notification' });
+  // host link reopen
+  const before = failures();
+  host.dropConnections();
+  await waitFor(() => failures() > before, { what: 'a logged failure for link open' });
+  // instances frame, with a pending ask so the ask-only run gets as far as writing
+  const afterOpen = failures();
+  host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, notify: false, frames: false });
+  host.broadcast({ t: 'instances', instances: host.state.instances });
+  await waitFor(() => failures() > afterOpen, { what: 'a logged failure for instances' });
+  // the direct entry point used at startup
+  const beforeDirect = failures();
+  await app.deps.announcer.reconcileLogged();
+  assert.ok(failures() > beforeDirect);
+  await ticks();
+  assert.deepEqual(rejections, []);
+});
+
+// ---- dropped options ----
+
+test('a questions section too big even for bare labels is announced as missing options, not merely shortened', async (t) => {
+  const { host, sse } = await setup(t);
+  const many = [{ question: 'Which?', header: 'Pick', multiSelect: false, options: Array.from({ length: 400 }, (_, i) => ({ label: `Opt ${i}`, description: 'desc '.repeat(20) })) }];
+  host.finishAsk('cond-a', { kind: 'question', questions: many, prose: 'Pick one.' });
+  const ev = await sse.next('announce');
+  assert.ok(ev.data.text.length <= 4000);
+  assert.deepEqual(ev.data.ask, { kind: 'question', count: 1, truncated: true, dropped: true });
+  assert.match(ev.data.text, /\n… \d+ more line\(s\) not shown$/);
 });

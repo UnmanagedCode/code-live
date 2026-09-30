@@ -104,6 +104,7 @@ export function createConductorService({ api, link, state, announcer, publish, h
             ...(m.planPath ? { planPath: m.planPath } : {}),
             ...(m.questionCount !== undefined ? { questionCount: m.questionCount } : {}),
             ...(body.cut ? { questionsTruncated: true } : {}),
+            ...(body.dropped ? { questionsDropped: true } : {}),
           };
         });
       } catch (e) {

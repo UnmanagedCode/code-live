@@ -8,9 +8,9 @@ import { truncateBody, toolAsk, lastAssistantMsgId, assistantText, newestTurnEnd
 const QUESTIONS = '--- questions ---\n1. Pick one (multiSelect: false) · header: Pick\n   - Alpha: first\n   - Beta: second';
 
 test('truncateBody leaves short text alone and cuts long prose from the end', () => {
-  assert.deepEqual(truncateBody('short', 10), { text: 'short', cut: false });
-  assert.deepEqual(truncateBody('x'.repeat(50), 10), { text: `${'x'.repeat(9)}…`, cut: false });
-  assert.deepEqual(truncateBody('', 10), { text: '', cut: false });
+  assert.deepEqual(truncateBody('short', 10), { text: 'short', cut: false, dropped: false });
+  assert.deepEqual(truncateBody('x'.repeat(50), 10), { text: `${'x'.repeat(9)}…`, cut: false, dropped: false });
+  assert.deepEqual(truncateBody('', 10), { text: '', cut: false, dropped: false });
 });
 
 test('truncateBody keeps the trailing questions section whole and cuts the prose before it', () => {
@@ -23,12 +23,12 @@ test('truncateBody keeps the trailing questions section whole and cuts the prose
 });
 
 test('truncateBody keeps only the questions when they leave no room for prose', () => {
-  assert.deepEqual(truncateBody(`${'p'.repeat(500)}\n${QUESTIONS}`, QUESTIONS.length + 1), { text: QUESTIONS, cut: false });
+  assert.deepEqual(truncateBody(`${'p'.repeat(500)}\n${QUESTIONS}`, QUESTIONS.length + 1), { text: QUESTIONS, cut: false, dropped: false });
 });
 
 test('truncateBody cuts a plan from the end', () => {
   const plan = `intro\n--- plan ---\n${'s'.repeat(300)}`;
-  assert.deepEqual(truncateBody(plan, 100), { text: `${plan.slice(0, 99)}…`, cut: false });
+  assert.deepEqual(truncateBody(plan, 100), { text: `${plan.slice(0, 99)}…`, cut: false, dropped: false });
 });
 
 // Ten questions of six options, each with a long description.
@@ -53,11 +53,30 @@ test('an oversized questions section is shortened within, descriptions before la
   assert.ok(text.includes('…'), 'descriptions were cut');
 });
 
-test('a questions section too big even for bare labels loses trailing lines and is flagged', () => {
+test('descriptions are shortened first; a label longer than the cap is cut too, and nothing is dropped', () => {
+  const longLabel = 'L'.repeat(200);
+  const qs = [{ question: 'Q?', multiSelect: false, options: Array.from({ length: 30 }, (_, i) => ({ label: i === 0 ? longLabel : `Option ${i}`, description: 'd'.repeat(300) })) }];
+  const full = renderQuestions(qs);
+  assert.ok(full.length > 4000);
+  const { text, cut, dropped } = truncateBody(full, 4000);
+  assert.deepEqual([cut, dropped], [true, false]);
+  assert.ok(text.length <= 4000);
+  for (let i = 1; i < 30; i++) assert.ok(text.includes(`Option ${i}`), `Option ${i}`);
+  assert.ok(!text.includes(longLabel), 'the long label was cut');
+  assert.ok(text.includes('L'.repeat(20)), 'but its start remains');
+  assert.ok(!text.includes('more line(s) not shown'));
+});
+
+test('a questions section too big even for bare labels drops whole trailing lines, says how many, and is flagged dropped', () => {
   const many = [{ question: 'Q?', multiSelect: false, options: Array.from({ length: 400 }, (_, i) => ({ label: `Option number ${i}`, description: '' })) }];
-  const { text, cut } = truncateBody(renderQuestions(many), 1000);
-  assert.equal(cut, true);
+  const full = renderQuestions(many);
+  const { text, cut, dropped } = truncateBody(full, 1000);
+  assert.deepEqual([cut, dropped], [true, true]);
   assert.ok(text.length <= 1000);
+  const lines = text.split('\n');
+  const shown = lines.length - 1;
+  assert.match(lines.at(-1), new RegExp(`^… ${401 + 1 - shown} more line\\(s\\) not shown$`), 'the count matches what was dropped');
+  assert.ok(lines.slice(0, -1).every((l, i) => full.split('\n')[i].startsWith(l.replace(/…$/, ''))), 'kept lines are the original leading lines, in order');
 });
 
 test('renderQuestions and renderPlan follow the host body format', () => {
@@ -66,6 +85,17 @@ test('renderQuestions and renderPlan follow the host body format', () => {
   assert.equal(renderPlan({ plan: 'Do it', planPath: '/p.md' }), '--- plan · saved to /p.md ---\nDo it');
   assert.equal(renderPlan({ plan: 'Do it', planPath: null }), '--- plan ---\nDo it');
   assert.equal(renderPlan({ plan: null, planPath: '/p.md' }), '--- plan · saved to /p.md ---');
+});
+
+test('renderQuestions and renderPlan tolerate malformed host payloads instead of throwing', () => {
+  assert.equal(renderQuestions(null), '--- questions ---');
+  assert.equal(renderQuestions('nope'), '--- questions ---');
+  assert.equal(
+    renderQuestions([null, 7, { question: 5, multiSelect: 1, header: {}, options: [null, 'x', { label: 3, description: [] }, { label: 'Real', description: 'kept' }, { label: null }] }, { options: 'no' }]),
+    '--- questions ---\n1.  (multiSelect: false)\n2.  (multiSelect: false)\n3.  (multiSelect: true)\n   - \n   - \n   - \n   - Real: kept\n   - \n4.  (multiSelect: false)',
+  );
+  assert.equal(renderPlan(null), '--- plan ---');
+  assert.equal(renderPlan({ plan: { not: 'text' }, planPath: 5 }), '--- plan ---');
 });
 
 test('toolAsk is set only for a tool-sourced question or plan', () => {

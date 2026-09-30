@@ -53,7 +53,7 @@ Each frame is `id: <boot>-<n>` / `event: <name>` / `data: <json>`. `<boot>` is r
 |---|---|---|
 | `target` | `{sessionId, title}` or `null` | on connect (**no id**; the current target, or `null` unless it is a live conductor row the host confirms), and on every target change |
 | `host` | `{connected:boolean}` | on connect (no id), and when the backend's host `/ws` link opens or closes |
-| `announce` | `{sessionId, title, text, turnSeq, isError, ask}` | when the active target finishes a turn. `text` is at most 4000 chars, or `(turn finished with no text reply)`. `ask` is `{kind:"question", count, truncated?}` (AskUserQuestion pending; `text` holds the `--- questions ---` section; `truncated:true` means option descriptions were shortened to fit 4000 chars), `{kind:"plan", planPath:string\|null}` (ExitPlanMode pending), or `null` |
+| `announce` | `{sessionId, title, text, turnSeq, isError, ask}` | when the active target finishes a turn. `text` is at most 4000 chars, or `(turn finished with no text reply)`. `ask` is `{kind:"question", count, truncated?, dropped?}` (AskUserQuestion pending; `text` holds the `--- questions ---` section; `truncated:true` means its lines were shortened to fit 4000 chars, and `dropped:true` that whole trailing lines (options, or questions) are missing and the last line says how many), `{kind:"plan", planPath:string\|null}` (ExitPlanMode pending), or `null` |
 
 - **Replay:** the backend keeps the last 20 id-bearing events.
   - A request with `Last-Event-ID` from this process gets every ring event after it.
@@ -133,7 +133,7 @@ Failures are `{ok:false, code, message}`:
 - **Explicit `count`:** exactly that many messages, literally and without bonding, as the host treats an explicit count.
 - Each `text` is the message body as the host renders it: prose, then a `--- plan ---` / `--- plan · saved to <path> ---` section and a `--- questions ---` section (`N. <question> (multiSelect: <bool>) · header: <h>`, then `   - <label>: <description>` per option) in the order they occurred. The host's `--- message i/N … ---` boundary line is dropped.
 - `hasPlan`, `planPath` and `questionCount` appear only on the message that carries them.
-- A `text` over 4000 chars keeps a trailing questions section whole and cuts the prose before it. A questions section that alone exceeds 4000 chars is shortened line by line, option descriptions before labels, and the message gets `questionsTruncated:true`. Anything else is cut from the end.
+- A `text` over 4000 chars keeps a trailing questions section whole and cuts the prose before it. A questions section that alone exceeds 4000 chars is shortened line by line (every line capped at 160, then 80, 40 and 20 chars until it fits, so descriptions go first but a label longer than the cap is cut too) and the message gets `questionsTruncated:true`. If even 20-char lines do not fit, trailing lines are dropped whole, the section ends with `… N more line(s) not shown`, and the message also gets `questionsDropped:true`. Anything else is cut from the end.
 - If the `/mcp` read fails, or the session has no host session id yet, the result is the last `count` (default 1) assistant text messages from the events route, as `[{text}]`, and the failure is logged.
 
 ### Answering and deciding

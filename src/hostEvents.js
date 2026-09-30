@@ -13,52 +13,71 @@ export function truncate(text, max) {
   return text.length <= max ? text : text.slice(0, max - 1) + '…';
 }
 
-// Caps every line of `lines` at `cap` chars, which drops an option's
-// description before its label (the label comes first on the line).
+// Caps every line at `cap` chars. The label comes first on an option line, so a
+// description goes before its label, but a label longer than `cap` is cut too.
 function capLines(lines, cap) {
   return lines.map((l) => (l.length > cap ? `${l.slice(0, cap - 1)}…` : l));
 }
 
-// The text kept when a body exceeds `max`, as {text, cut}. A trailing
+// The text kept when a body exceeds `max`, as {text, cut, dropped}. A trailing
 // `--- questions ---` section stays whole when it fits (the user must hear
 // every option) and the prose before it is cut. A section that alone exceeds
-// `max` is shortened line by line, descriptions before labels, and only as a
-// last resort loses trailing lines; `cut` is then true. Anything else, a plan
-// included, is cut from the end.
+// `max` is shortened line by line (`cut`); if even that does not fit, trailing
+// lines are dropped whole and a last line counts them (`dropped`, which
+// implies `cut`). Anything else, a plan included, is cut from the end and
+// reports neither.
 export function truncateBody(text, max) {
-  if (typeof text !== 'string') return { text: '', cut: false };
-  if (text.length <= max) return { text, cut: false };
+  if (typeof text !== 'string') return { text: '', cut: false, dropped: false };
+  if (text.length <= max) return { text, cut: false, dropped: false };
   const fences = [...text.matchAll(/^--- questions ---$/gm)];
   const at = fences.length ? fences[fences.length - 1].index : -1;
-  if (at < 0) return { text: truncate(text, max), cut: false };
+  if (at < 0) return { text: truncate(text, max), cut: false, dropped: false };
   const section = text.slice(at);
   const room = max - section.length - 1;
   if (room >= 0) {
     const head = text.slice(0, at).replace(/\n+$/, '');
-    return { text: (room >= 2 && head ? `${truncate(head, room)}\n` : '') + section, cut: false };
+    return { text: (room >= 2 && head ? `${truncate(head, room)}\n` : '') + section, cut: false, dropped: false };
   }
   const lines = section.split('\n');
   for (const cap of [160, 80, 40, 20]) {
     const fitted = capLines(lines, cap).join('\n');
-    if (fitted.length <= max) return { text: fitted, cut: true };
+    if (fitted.length <= max) return { text: fitted, cut: true, dropped: false };
   }
-  return { text: truncate(capLines(lines, 20).join('\n'), max), cut: true };
+  const capped = capLines(lines, 20);
+  const kept = [];
+  let used = 0;
+  for (const l of capped) {
+    if (used + l.length + 1 > max - 40) break;
+    kept.push(l);
+    used += l.length + 1;
+  }
+  kept.push(`… ${capped.length - kept.length} more line(s) not shown`);
+  return { text: kept.join('\n'), cut: true, dropped: true };
 }
+
+// Host payload fields are not trusted to be well formed: anything else than a
+// string renders as empty rather than throwing.
+const str = (v) => (typeof v === 'string' ? v : '');
+const obj = (v) => (v && typeof v === 'object' ? v : {});
 
 // The host's rendering of an AskUserQuestion payload in a message body.
 export function renderQuestions(questions) {
   const lines = ['--- questions ---'];
-  questions.forEach((q, i) => {
-    lines.push(`${i + 1}. ${q.question ?? ''} (multiSelect: ${!!q.multiSelect})${q.header ? ` · header: ${q.header}` : ''}`);
-    for (const opt of q.options ?? []) lines.push(`   - ${opt.label ?? ''}${opt.description ? `: ${opt.description}` : ''}`);
+  (Array.isArray(questions) ? questions : []).forEach((raw, i) => {
+    const q = obj(raw);
+    lines.push(`${i + 1}. ${str(q.question)} (multiSelect: ${!!q.multiSelect})${str(q.header) ? ` · header: ${q.header}` : ''}`);
+    for (const rawOpt of Array.isArray(q.options) ? q.options : []) {
+      const opt = obj(rawOpt);
+      lines.push(`   - ${str(opt.label)}${str(opt.description) ? `: ${opt.description}` : ''}`);
+    }
   });
   return lines.join('\n');
 }
 
 // The host's rendering of an ExitPlanMode payload (a plan_request event).
 export function renderPlan(ev) {
-  const header = ev.planPath ? `--- plan · saved to ${ev.planPath} ---` : '--- plan ---';
-  return ev.plan ? `${header}\n${ev.plan}` : header;
+  const header = str(ev?.planPath) ? `--- plan · saved to ${ev.planPath} ---` : '--- plan ---';
+  return str(ev?.plan) ? `${header}\n${ev.plan}` : header;
 }
 
 // 'question' or 'plan' while the row shows an AskUserQuestion / ExitPlanMode

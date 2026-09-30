@@ -102,7 +102,7 @@ export async function start(env = process.env) {
   const deps = await buildDeps(config);
   const server = createServer(deps);
   deps.link.start();
-  deps.announcer.reconcile();
+  deps.announcer.reconcileLogged();
   await listenWithRetry(server, config.port, config.host);
   console.log(`code-live listening on http://${config.host}:${server.address().port}`);
   process.once('SIGTERM', () => {

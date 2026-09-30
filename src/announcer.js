@@ -32,6 +32,8 @@ function eventsText(events, turnEnd) {
   return text;
 }
 
+const logFailure = (e) => console.error('code-live: reconcile failed:', e?.message ?? e);
+
 // Identifies one pending ask on a row, so an unchanged ask is probed once.
 function askKey(row) {
   return toolAsk(row) ? `${row.awaitingUser}:${row.lastResponseAt ?? ''}` : null;
@@ -93,7 +95,8 @@ export function createAnnouncer({ api, link, state, publish, hostMcp }) {
     }
     const carried = messages?.findLast((m) => m.hasPlan);
     if (!carried) add(renderPlan(pending.ev));
-    return { text, ask: { kind: 'plan', planPath: (carried ? carried.planPath : pending.ev.planPath) ?? null } };
+    const planPath = carried ? carried.planPath : pending.ev.planPath;
+    return { text, ask: { kind: 'plan', planPath: typeof planPath === 'string' ? planPath : null } };
   }
 
   function emit(id, row, turnEnd, { text, ask }) {
@@ -104,7 +107,7 @@ export function createAnnouncer({ api, link, state, publish, hostMcp }) {
       text: fitted ? fitted.text : NO_TEXT,
       turnSeq: turnEnd._seq,
       isError: !!turnEnd.isError,
-      ask: ask && fitted?.cut ? { ...ask, truncated: true } : ask,
+      ask: ask && fitted?.cut ? { ...ask, truncated: true, ...(fitted.dropped ? { dropped: true } : {}) } : ask,
     });
   }
 
@@ -178,6 +181,12 @@ export function createAnnouncer({ api, link, state, publish, hostMcp }) {
   const announcer = {
     reconcile: () => serialize(doReconcile),
 
+    // For triggers that have nobody to hand a rejection to: a failure is
+    // logged, never left unhandled.
+    reconcileLogged({ ask = false } = {}) {
+      return (ask ? announcer.reconcileAsk() : announcer.reconcile()).catch(logFailure);
+    },
+
     // Reconciles for a pending question or plan the host may not have sent a
     // turn_notification for. Coalesced, and skipped once the row's ask state
     // has been settled by a completed reconcile.
@@ -207,19 +216,22 @@ export function createAnnouncer({ api, link, state, publish, hostMcp }) {
     baseline: (id, seq) => serialize(async () => {
       let handled = seq;
       let msgId = null;
-      let ask = null;
       if (handled === undefined) {
         const data = await api.getEvents(id);
         const events = Array.isArray(data?.events) ? data.events : [];
         const newest = newestTurnEnd(events, -Infinity);
         handled = newest ? newest._seq : -1;
         if (newest) msgId = lastAssistantMsgId(events, newest._seq);
-        // A question or plan the session already ended on is not news either.
-        const asks = ['question', 'plan'].map((k) => latestAskEvent(events, k)).filter((ev) => ev && askTurnEnd(events, ev));
-        if (asks.length) ask = askId(asks.reduce((a, b) => (b._seq > a._seq ? b : a)));
       }
       probed = { key: null, done: false };
+      // Finished turns are not replayed on a switch, but a question or plan the
+      // row still shows as unanswered is news: it is announced once. Re-picking
+      // the current target keeps what it already announced.
+      const st = state.get();
+      const ask = st.activeTargetId === id ? st.lastHandledAskId : null;
       await state.update({ activeTargetId: id, lastHandledTurnSeq: handled, lastHandledMsgId: msgId, lastHandledAskId: ask });
+    }).then(() => {
+      announcer.reconcileLogged({ ask: true });
     }),
 
     clear: () => serialize(() => state.update({ activeTargetId: null })),
@@ -227,12 +239,10 @@ export function createAnnouncer({ api, link, state, publish, hostMcp }) {
 
   if (link) {
     link.on('turn_notification', (frame) => {
-      if (frame.id && frame.id === state.get().activeTargetId) announcer.reconcile();
+      if (frame.id && frame.id === state.get().activeTargetId) announcer.reconcileLogged();
     });
-    link.on('instances', () => {
-      announcer.reconcileAsk().catch((e) => console.error('code-live: reconcile failed:', e.message));
-    });
-    link.on('open', () => { announcer.reconcile(); });
+    link.on('instances', () => { announcer.reconcileLogged({ ask: true }); });
+    link.on('open', () => { announcer.reconcileLogged(); });
   }
 
   return announcer;

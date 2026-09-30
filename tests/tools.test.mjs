@@ -522,3 +522,22 @@ test('a sub-agent question event is not the conductor\'s pending question', asyn
   assert.equal(r.ok, true);
   assert.deepEqual(called(host, 'answer_question')[0].arguments.answers, [{ option: 'SQLite' }, { options: ['Test'] }]);
 });
+
+test('a read of options that had to be dropped says so, and answering still reaches the dropped options by number', async (t) => {
+  const { host, app } = await setup(t, { active: 'cond-a' });
+  const many = [{ question: 'Which?', multiSelect: false, options: Array.from({ length: 400 }, (_, i) => ({ label: `Opt ${i}`, description: 'desc '.repeat(20) })) }];
+  host.finishAsk('cond-a', { kind: 'question', questions: many, frames: false });
+  const [m] = (await callTool(app, 'read_conductor_messages')).messages;
+  assert.equal(m.questionsTruncated, true);
+  assert.equal(m.questionsDropped, true);
+  assert.match(m.text, /more line\(s\) not shown$/);
+  host.setMcp('answer_question', () => mcpOk({ sessionId: 's-a', mode: 'plan', sentText: 't' }));
+  assert.equal((await callTool(app, 'answer_conductor_question', { answers: [{ choices: ['400'] }] })).ok, true);
+  assert.deepEqual(called(host, 'answer_question')[0].arguments.answers, [{ option: 'Opt 399' }]);
+  // Shortened only: no dropped flag.
+  const { host: host2, app: app2 } = await setup(t, { active: 'cond-a' });
+  host2.finishAsk('cond-a', { kind: 'question', questions: BIG, frames: false });
+  const [short] = (await callTool(app2, 'read_conductor_messages')).messages;
+  assert.equal(short.questionsTruncated, true);
+  assert.equal('questionsDropped' in short, false);
+});

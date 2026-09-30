@@ -113,3 +113,10 @@ test('a question announce whose options were shortened says so in its final line
   assert.match(sent[0], /AWAITING ANSWER: 10 question\(s\)\. Use answer_conductor_question\. Some options above were shortened: say so, and let the user pick by option number\.$/);
   assert.match(sent[1], /answer_conductor_question\.$/, 'an untruncated ask has no note');
 });
+
+test('a question announce with dropped options says options are missing, not merely shortened', async () => {
+  const { es, sent } = await setup('live');
+  es.emit('announce', { sessionId: 'c', title: 'Alpha', text: 'Q', ask: { kind: 'question', count: 1, truncated: true, dropped: true } });
+  assert.match(sent[0], /answer_conductor_question\. Some options are missing from the text above: say so, and let the user pick by option number\.$/);
+  assert.doesNotMatch(sent[0], /shortened/);
+});
