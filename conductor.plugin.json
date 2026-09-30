@@ -1,0 +1,8 @@
+{
+  "id": "code-live",
+  "name": "Code Live",
+  "version": "0.1.0",
+  "pluginApi": 1,
+  "backend": { "start": "node server.js", "healthPath": "/api/health" },
+  "frontend": { "path": "/", "navLabel": "Code Live" }
+}
