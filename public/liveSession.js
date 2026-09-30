@@ -1,7 +1,8 @@
 // Gemini Live session client (DOM-free). Connects with an ephemeral token
 // minted by the backend, turns server messages into events, runs tool calls
-// through the backend, and resumes on goAway or an unexpected close using the
-// latest resumption handle.
+// through the backend, and reconnects on goAway or an unexpected close using
+// the latest resumption handle. The mic pause is a flag beside the state: it
+// survives live <-> reconnecting and is cleared by any other state.
 const MIME_IN = 'audio/pcm;rate=16000';
 
 function decode(data) {
@@ -30,6 +31,7 @@ export function createLiveSession({
   let state = 'idle';
   let model = null;
   let handle = null;
+  let paused = false; // mic pause: audio is dropped and Gemini was told the stream ended
   let generation = 0; // bumped by connect/disconnect so stale sockets are ignored
   const cancelled = new Set();
 
@@ -37,6 +39,10 @@ export function createLiveSession({
 
   function setState(s, detail) {
     state = s;
+    if (paused && s !== 'live' && s !== 'reconnecting') {
+      paused = false;
+      emit({ type: 'mic', paused: false });
+    }
     emit({ type: 'state', state: s, ...(detail ? { detail } : {}) });
   }
 
@@ -87,13 +93,13 @@ export function createLiveSession({
         if (!ready) { fail(`Gemini closed the connection (${ev.code}${ev.reason ? ': ' + ev.reason : ''})`); return; }
         if (ws !== sock) return;
         ws = null;
-        if (state === 'live' && handle) resume();
+        if (state === 'live' && handle) reconnect();
         else if (state === 'live') setState('error', `Gemini closed the connection (${ev.code}${ev.reason ? ': ' + ev.reason : ''})`);
       });
     });
   }
 
-  async function resume() {
+  async function reconnect() {
     if (state === 'reconnecting') return;
     if (!handle) { setState('error', 'The connection ended and cannot be resumed.'); return; }
     const gen = generation;
@@ -148,11 +154,12 @@ export function createLiveSession({
     }
     const upd = msg.sessionResumptionUpdate;
     if (upd && upd.resumable && upd.newHandle) handle = upd.newHandle;
-    if (msg.goAway) resume();
+    if (msg.goAway) reconnect();
   }
 
   return {
     get state() { return state; },
+    get micPaused() { return paused; },
 
     async connect(modelId) {
       if (state !== 'idle' && state !== 'error') return;
@@ -184,11 +191,22 @@ export function createLiveSession({
     },
 
     sendAudio(data) {
-      if (state === 'live') send({ realtimeInput: { audio: { data, mimeType: MIME_IN } } });
+      if (state === 'live' && !paused) send({ realtimeInput: { audio: { data, mimeType: MIME_IN } } });
     },
 
-    endAudio() {
+    // Mic-only: the socket, handle and conversation are untouched. While
+    // reconnecting there is no socket, and the next one has received no audio.
+    pauseMic() {
+      if ((state !== 'live' && state !== 'reconnecting') || paused) return;
+      paused = true;
       if (state === 'live') send({ realtimeInput: { audioStreamEnd: true } });
+      emit({ type: 'mic', paused: true });
+    },
+
+    resumeMic() {
+      if (!paused) return;
+      paused = false;
+      emit({ type: 'mic', paused: false });
     },
 
     sendText(text) {

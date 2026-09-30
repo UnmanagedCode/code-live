@@ -11,11 +11,13 @@
   <header class="statusbar">
     <h1>Code Live</h1>
     <span id="state" class="pill" data-state="idle">idle</span>
+    <span id="mic" class="pill" data-state="paused" hidden>Mic paused</span>
     <span id="host" class="pill" data-state="off">Host disconnected</span>
   </header>
   <section class="controls">
     <label>Model <select id="model" aria-label="Gemini model"></select></label>
     <button id="connect" type="button">Connect</button>
+    <button id="pause" type="button" class="secondary" disabled aria-pressed="false">Pause mic</button>
     <button id="disconnect" type="button" class="secondary" disabled>Disconnect</button>
   </section>
   <section id="target" class="controls"></section>

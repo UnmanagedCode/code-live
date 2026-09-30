@@ -14,7 +14,7 @@ h1 { font-size: 1.1rem; margin: 0 auto 0 0; }
 .statusbar, .controls { display: flex; gap: .6rem; align-items: center; padding: .5rem 1rem; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
 .pill { font-size: .8rem; padding: .15rem .6rem; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
 .pill[data-state="live"], .pill[data-state="on"] { color: var(--ok); border-color: var(--ok); }
-.pill[data-state="connecting"], .pill[data-state="reconnecting"] { color: var(--warn); border-color: var(--warn); }
+.pill[data-state="connecting"], .pill[data-state="reconnecting"], .pill[data-state="paused"] { color: var(--warn); border-color: var(--warn); }
 .pill[data-state="error"] { color: var(--bad); border-color: var(--bad); }
 button { font: inherit; padding: .3rem .9rem; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
 button.secondary { background: transparent; color: var(--fg); border-color: var(--border); }

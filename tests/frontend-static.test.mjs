@@ -1,6 +1,7 @@
 // Pins: the frontend has no HTML-injection or code-eval sinks, no
 // root-relative URLs (the page lives under the host's plugin prefix), and
-// index.html references only existing local files with no inline code/style.
+// index.html references only existing local files with no inline code/style,
+// and defines every id the page scripts look up.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync, existsSync } from 'node:fs';
@@ -40,4 +41,18 @@ test('index.html: relative, existing references and no inline code', () => {
   assert.ok(!/<style\b/i.test(html), 'no <style>');
   assert.ok(!/\sstyle=/i.test(html), 'no style=');
   assert.ok(!/\son[a-z]+=/i.test(html), 'no on*= handlers');
+});
+
+test('every id the scripts look up is defined in index.html', () => {
+  // A missing id makes the lookup return null and the module throw at load,
+  // which kills the whole page.
+  const html = readFileSync(new URL('index.html', PUB), 'utf8');
+  const defined = new Set([...html.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]));
+  const looked = new Set();
+  for (const f of jsFiles) {
+    const src = readFileSync(new URL(f, PUB), 'utf8');
+    for (const m of src.matchAll(/(?:\$|getElementById)\(\s*'([^']+)'\s*\)/g)) looked.add(m[1]);
+  }
+  for (const id of ['connect', 'disconnect', 'pause', 'mic', 'state']) assert.ok(looked.has(id), `the scan sees $('${id}')`);
+  for (const id of looked) assert.ok(defined.has(id), `index.html defines id="${id}"`);
 });
