@@ -9,6 +9,7 @@ import { createStateStore } from './src/stateStore.js';
 import { createGemini } from './src/gemini.js';
 import { createCcApi } from './src/ccApi.js';
 import { createCcLink } from './src/ccLink.js';
+import { createHostMcp } from './src/hostMcp.js';
 import { createAnnouncer } from './src/announcer.js';
 import { createConductorService } from './src/conductor.js';
 import { createSseHub } from './src/sse.js';
@@ -34,12 +35,13 @@ export async function buildDeps(config, opts = {}) {
   const publish = (event, data) => sse.publish(event, data);
   const api = createCcApi({ baseUrl: config.conductorUrl, ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}) });
   const link = createCcLink({ url: config.hostWsUrl, ...(opts.link ?? {}) });
-  const announcer = createAnnouncer({ api, link, state, publish });
-  const service = createConductorService({ api, link, state, announcer, publish });
+  const hostMcp = createHostMcp({ baseUrl: config.conductorUrl, ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}) });
+  const announcer = createAnnouncer({ api, link, state, publish, hostMcp });
+  const service = createConductorService({ api, link, state, announcer, publish, hostMcp });
   const gemini = createGemini({ base: config.geminiBase, wsUrl: config.geminiWsUrl, keyStore, ...(opts.now ? { now: opts.now } : {}) });
   link.on('open', () => publish('host', { connected: true }));
   link.on('close', () => publish('host', { connected: false }));
-  return { config, headers, keyStore, state, sse, api, link, announcer, service, gemini, staticFiles: await loadStaticFiles(PUBLIC_DIR) };
+  return { config, headers, keyStore, state, sse, api, hostMcp, link, announcer, service, gemini, staticFiles: await loadStaticFiles(PUBLIC_DIR) };
 }
 
 export function createServer(deps) {

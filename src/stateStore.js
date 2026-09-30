@@ -1,9 +1,10 @@
 // Persistent runtime state at <dataDir>/state.json: the active conductor
-// target and the _seq of the last turn_end already announced for it.
+// target, the _seq of the last turn_end already announced for it and the msgId
+// of that turn's last assistant message (the key that survives a host ring reset).
 import path from 'node:path';
 import { writeFileAtomic, readJson } from './atomicFile.js';
 
-const EMPTY = { activeTargetId: null, lastHandledTurnSeq: -1 };
+const EMPTY = { activeTargetId: null, lastHandledTurnSeq: -1, lastHandledMsgId: null };
 
 // `write` is injectable so tests can make write completion order observable.
 export function createStateStore({ dir, write = writeFileAtomic }) {
@@ -18,10 +19,11 @@ export function createStateStore({ dir, write = writeFileAtomic }) {
       if (data === null) { state = { ...EMPTY }; return state; }
       if (typeof data !== 'object'
         || !(data.activeTargetId === null || typeof data.activeTargetId === 'string')
-        || typeof data.lastHandledTurnSeq !== 'number') {
+        || typeof data.lastHandledTurnSeq !== 'number'
+        || !(data.lastHandledMsgId === undefined || data.lastHandledMsgId === null || typeof data.lastHandledMsgId === 'string')) {
         throw Object.assign(new Error('state.json is malformed'), { code: 'STORE_CORRUPT' });
       }
-      state = { activeTargetId: data.activeTargetId, lastHandledTurnSeq: data.lastHandledTurnSeq };
+      state = { activeTargetId: data.activeTargetId, lastHandledTurnSeq: data.lastHandledTurnSeq, lastHandledMsgId: data.lastHandledMsgId ?? null };
       return state;
     },
     get() { return { ...state }; },

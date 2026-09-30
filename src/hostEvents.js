@@ -13,6 +13,26 @@ export function truncate(text, max) {
   return text.length <= max ? text : text.slice(0, max - 1) + '…';
 }
 
+// The text kept when a body exceeds `max`: a trailing `--- questions ---`
+// section stays whole (the user must hear every option) and the prose before
+// it is cut; anything else, a plan included, is cut from the end.
+export function truncateBody(text, max) {
+  if (typeof text !== 'string' || text.length <= max) return typeof text === 'string' ? text : '';
+  const fences = [...text.matchAll(/^--- questions ---$/gm)];
+  const at = fences.length ? fences[fences.length - 1].index : -1;
+  const room = max - (text.length - at) - 1;
+  if (at < 0 || room < 0) return truncate(text, max);
+  const head = text.slice(0, at).replace(/\n+$/, '');
+  return (room >= 2 && head ? `${truncate(head, room)}\n` : '') + text.slice(at);
+}
+
+// 'question' or 'plan' while the row shows an AskUserQuestion / ExitPlanMode
+// the user has not answered (the host's sticky awaiting-user state), else null.
+export function toolAsk(row) {
+  const ask = row?.awaitingUser;
+  return row?.awaitingUserSource === 'tool' && (ask === 'question' || ask === 'plan') ? ask : null;
+}
+
 // The host's raw `status: 'idle'` only means the session's own turn ended. Like
 // the host's own UI, prefer `displayStatus` (`running` while background subagents
 // work) and label an idle session that awaits a worker's wake `on a worker`.
@@ -47,4 +67,18 @@ export function assistantText(ev) {
 
 export function hasSeq(ev) {
   return !!ev && typeof ev._seq === 'number';
+}
+
+// The msgId of the last assistant message inside the turn that ends at
+// `endSeq` (after the previous turn_end), or null when that turn said nothing.
+export function lastAssistantMsgId(events, endSeq) {
+  let turnStart = -Infinity;
+  for (const ev of events) {
+    if (ev.kind === 'turn_end' && hasSeq(ev) && ev._seq < endSeq && ev._seq > turnStart) turnStart = ev._seq;
+  }
+  let found = null;
+  for (const ev of events) {
+    if (ev.kind === 'assistant_message' && hasSeq(ev) && ev._seq > turnStart && ev._seq < endSeq && typeof ev.msgId === 'string') found = ev.msgId;
+  }
+  return found;
 }

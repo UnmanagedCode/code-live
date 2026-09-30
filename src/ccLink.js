@@ -1,5 +1,5 @@
 // Persistent client for the host's /ws hub: sends prompt frames paired to
-// their acks by reqId, and re-emits turn_notification broadcasts. Reconnects
+// their acks by reqId, and re-emits turn_notification and instances broadcasts. Reconnects
 // with capped exponential backoff; the host has no replay, so consumers
 // reconcile over REST on every 'open'.
 import { EventEmitter } from 'node:events';
@@ -54,6 +54,8 @@ export function createCcLink({
       else p.reject(linkError('HOST_REFUSED', `code-conductor refused the prompt: ${msg.error ?? 'no reason given'}`));
     } else if (msg.t === 'turn_notification') {
       link.emit('turn_notification', msg);
+    } else if (msg.t === 'instances') {
+      link.emit('instances', msg);
     }
   }
 

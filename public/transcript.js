@@ -26,11 +26,13 @@ export function createTranscript(root) {
   }
 
   return {
-    // meta.title labels conductor entries; meta.name labels tool entries.
+    // meta.title labels conductor entries (meta.ask adds `question` or `plan`);
+    // meta.name labels tool entries.
     add(kind, content, meta = {}) {
       stream = null;
       let label = LABELS[kind] ?? kind;
       if (meta.title) label += ` · ${meta.title}`;
+      if (meta.ask) label += ` · ${meta.ask}`;
       if (meta.name) label += ` · ${meta.name}`;
       const body = JSON_KINDS.has(kind)
         ? el('pre', { class: 'entry-body' }, JSON.stringify(content, null, 2) ?? 'undefined')

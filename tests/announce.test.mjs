@@ -40,7 +40,7 @@ test('a turn_notification for the active target announces its last text reply', 
   const end = host.addEvent('cond-a', { kind: 'turn_end', isError: false });
   host.broadcast({ t: 'turn_notification', id: 'cond-a', project: '.conduct', isError: false });
   const ev = await sse.next('announce');
-  assert.deepEqual(ev.data, { sessionId: 'cond-a', title: 'Alpha plan', text: 'Done: \nall green', turnSeq: end._seq, isError: false });
+  assert.deepEqual(ev.data, { sessionId: 'cond-a', title: 'Alpha plan', text: 'Done: \nall green', turnSeq: end._seq, isError: false, ask: null });
   assert.match(ev.id, /^[0-9a-f]+-\d+$/);
   assert.equal(app.deps.state.get().lastHandledTurnSeq, end._seq);
 });
@@ -182,9 +182,9 @@ test('a persisted worker id is never announced and is cleared', async (t) => {
 
 test('the announced text is the reply before the turn_end, not the next turn\'s', async (t) => {
   const { host, app, sse } = await setup(t);
-  host.addEvent('cond-a', reply('reply to turn one'));
+  host.addEvent('cond-a', { ...reply('reply to turn one'), msgId: 'msg-one' });
   const end = host.addEvent('cond-a', { kind: 'turn_end', isError: false });
-  host.addEvent('cond-a', reply('turn two already talking'));
+  host.addEvent('cond-a', { ...reply('turn two already talking'), msgId: 'msg-two' });
   await app.deps.announcer.reconcile();
   const ev = await sse.next('announce');
   assert.equal(ev.data.text, 'reply to turn one');
@@ -207,4 +207,199 @@ test('a persisted worker id is never shown as the target', async (t) => {
   assert.deepEqual(await app.deps.service.getTarget(), { sessionId: 'cond-a', title: 'Alpha plan' });
   await host.close();
   assert.equal(await app.deps.service.getTarget(), null, 'unverifiable while the host is down');
+});
+
+// ---- questions and plans ----
+
+const QUESTIONS = [
+  { question: 'Which database?', header: 'DB', multiSelect: false, options: [{ label: 'Postgres (Recommended)', description: 'robust' }, { label: 'SQLite', description: 'tiny: embedded' }] },
+  { question: 'Which checks?', header: 'Checks', multiSelect: true, options: [{ label: 'Lint', description: 'style' }, { label: 'Test', description: 'unit' }] },
+];
+const mcpReads = (host) => host.mcpCalls.filter((c) => c.name === 'get_recent_messages');
+const announces = (sse) => sse.events.filter((e) => e.event === 'announce').map((e) => e.data);
+// Waits until everything published so far has been received.
+async function settle(app, sse) {
+  app.deps.sse.publish('marker', {});
+  await sse.next('marker');
+}
+
+test('a turn ending on AskUserQuestion announces its questions with every option and ask.count', async (t) => {
+  const { host, app, sse } = await setup(t);
+  const end = host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, prose: 'Two quick things.' });
+  const ev = await sse.next('announce');
+  assert.equal(ev.data.turnSeq, end._seq);
+  assert.deepEqual(ev.data.ask, { kind: 'question', count: 2 });
+  assert.match(ev.data.text, /^Two quick things\.\n--- questions ---\n1\. Which database\? \(multiSelect: false\) · header: DB\n   - Postgres \(Recommended\): robust\n   - SQLite: tiny: embedded\n2\. Which checks\? \(multiSelect: true\) · header: Checks\n   - Lint: style\n   - Test: unit$/);
+  assert.deepEqual(mcpReads(host).map((c) => c.arguments), [{ sessionId: 's-a' }], 'read by the host session id, with no count');
+  assert.equal(app.deps.state.get().lastHandledMsgId, `m${end._seq - 2}`);
+});
+
+test('a turn ending on ExitPlanMode announces the plan with ask.planPath', async (t) => {
+  const { host, sse } = await setup(t);
+  host.finishAsk('cond-a', { kind: 'plan', plan: 'Step 1: do it', planPath: '/plans/x.md', prose: 'Here is my plan.' });
+  const ev = await sse.next('announce');
+  assert.deepEqual(ev.data.ask, { kind: 'plan', planPath: '/plans/x.md' });
+  assert.equal(ev.data.text, 'Here is my plan.\n--- plan · saved to /plans/x.md ---\nStep 1: do it');
+  host.finishAsk('cond-a', { kind: 'plan', plan: 'inline plan', prose: 'Again.' });
+  const inline = await sse.next('announce', (d) => d.text.includes('inline plan'));
+  assert.deepEqual(inline.data.ask, { kind: 'plan', planPath: null });
+});
+
+test('no ask is reported when the row shows no unanswered tool ask (auto-approved, answered, or prose-only)', async (t) => {
+  const { host, sse } = await setup(t);
+  host.finishAsk('cond-a', { kind: 'plan', plan: 'auto-approved plan', row: { awaitingUser: null, awaitingUserSource: null } });
+  assert.equal((await sse.next('announce')).data.ask, null);
+  host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, row: { awaitingUser: 'question', awaitingUserSource: 'text' } });
+  const second = await sse.next('announce', (d) => d.text.includes('--- questions ---'));
+  assert.equal(second.data.ask, null, 'the text still carries the questions');
+  host.finishTurn('cond-a', 'plain reply');
+  assert.equal((await sse.next('announce', (d) => d.text === 'plain reply')).data.ask, null);
+});
+
+test('a suppressed question turn is announced once, triggered by the instances frame alone', async (t) => {
+  const { host, app, sse } = await setup(t);
+  host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, notify: false });
+  const ev = await sse.next('announce');
+  assert.deepEqual(ev.data.ask, { kind: 'question', count: 2 });
+  // More instances frames and a late turn_notification change nothing.
+  for (let i = 0; i < 3; i++) host.broadcast({ t: 'instances', instances: host.state.instances });
+  await app.deps.announcer.reconcileAsk();
+  host.broadcast({ t: 'turn_notification', id: 'cond-a' });
+  await drain(app, sse);
+  assert.equal(announces(sse).length, 1);
+});
+
+test('a suppressed turn without an ask stays silent on instances frames', async (t) => {
+  const { host, app, sse } = await setup(t);
+  host.requests.length = 0;
+  host.finishTurn('cond-a', 'paused while waiting on a worker', { notify: false });
+  host.broadcast({ t: 'instances', instances: host.state.instances });
+  await app.deps.announcer.reconcileAsk();
+  await settle(app, sse);
+  assert.deepEqual(announces(sse), []);
+  assert.equal(mcpReads(host).length, 0, 'nothing was read');
+  assert.equal(host.requests.filter((q) => q.url.startsWith('/api/instances/cond-a/events')).length, 0);
+  assert.equal(app.deps.state.get().lastHandledTurnSeq, -1, 'state untouched');
+});
+
+test('a burst of instances frames costs one MCP read', async (t) => {
+  const { host, app, sse } = await setup(t);
+  host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, notify: false });
+  for (let i = 0; i < 6; i++) host.broadcast({ t: 'instances', instances: host.state.instances });
+  await sse.next('announce');
+  await app.deps.announcer.reconcileAsk();
+  await settle(app, sse);
+  assert.equal(mcpReads(host).length, 1);
+  assert.equal(announces(sse).length, 1);
+});
+
+test('a notified ask turn is read once even though an instances frame arrives too', async (t) => {
+  const { host, app, sse } = await setup(t);
+  host.finishAsk('cond-a', { kind: 'plan', plan: 'p', planPath: '/p.md' });
+  await sse.next('announce');
+  await app.deps.announcer.reconcileAsk();
+  await settle(app, sse);
+  assert.equal(announces(sse).length, 1);
+  assert.equal(mcpReads(host).length, 1);
+});
+
+test('an ask whose turn has not ended is not announced early, then is once the turn ends', async (t) => {
+  const { host, app, sse } = await setup(t);
+  // The host sets the ask at the tool call; the turn_end lands later.
+  host.setRow('cond-a', { awaitingUser: 'question', awaitingUserSource: 'tool', lastResponseAt: 5 });
+  host.addEvent('cond-a', { kind: 'assistant_message', msgId: 'early', message: { content: [{ type: 'text', text: 'asking' }] } });
+  host.addEvent('cond-a', { kind: 'user_question', toolUseId: 't', questions: QUESTIONS });
+  host.broadcast({ t: 'instances', instances: host.state.instances });
+  await app.deps.announcer.reconcileAsk();
+  await settle(app, sse);
+  assert.deepEqual(announces(sse), []);
+  host.addEvent('cond-a', { kind: 'turn_end', isError: false });
+  host.broadcast({ t: 'instances', instances: host.state.instances });
+  const ev = await sse.next('announce');
+  assert.deepEqual(ev.data.ask, { kind: 'question', count: 2 });
+});
+
+test('the announced text falls back to /events, with a logged error, when the MCP read fails', async (t) => {
+  const { host, sse } = await setup(t);
+  const logged = t.mock.method(console, 'error', () => {});
+  host.setMcp('get_recent_messages', () => ({ content: [{ type: 'text', text: 'boom' }], isError: true }));
+  host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, prose: 'Fallback prose.' });
+  const ev = await sse.next('announce');
+  assert.equal(ev.data.text, 'Fallback prose.', 'the events prose, without the questions');
+  assert.equal(ev.data.ask, null);
+  assert.ok(logged.mock.calls.some((c) => /get_recent_messages failed/.test(String(c.arguments[0]))), 'the degradation is logged');
+});
+
+test('a conductor with no host session id yet falls back to /events', async (t) => {
+  const { host, sse } = await setup(t);
+  t.mock.method(console, 'error', () => {});
+  host.setRow('cond-a', { sessionId: null });
+  host.finishTurn('cond-a', 'spawned fast');
+  assert.equal((await sse.next('announce')).data.text, 'spawned fast');
+  assert.equal(host.mcpCalls.length, 0);
+});
+
+test('a host ring reset replays nothing, and the next turn is announced', async (t) => {
+  const { host, app, sse } = await setup(t);
+  const filler = () => { for (let i = 0; i < 5; i++) host.addEvent('cond-a', { kind: 'tool_use', name: 'Bash' }); };
+  filler();
+  host.finishTurn('cond-a', 'turn one', { notify: false });
+  filler();
+  const second = host.finishTurn('cond-a', 'turn two', { notify: false });
+  await app.deps.announcer.reconcile();
+  await settle(app, sse);
+  assert.deepEqual(announces(sse).map((a) => a.text), ['turn two']);
+  const handled = app.deps.state.get();
+  assert.equal(handled.lastHandledTurnSeq, second._seq);
+  // Respawn: the history is replayed into a ring with fewer, renumbered events.
+  host.resetRing('cond-a', { drop: (ev) => ev.kind === 'tool_use' });
+  await app.deps.announcer.reconcile();
+  await settle(app, sse);
+  assert.equal(announces(sse).length, 1, 'the replayed turn is not announced again');
+  assert.equal(app.deps.state.get().lastHandledTurnSeq, 4, 'the handled seq follows the renumbering');
+  assert.equal(app.deps.state.get().lastHandledMsgId, handled.lastHandledMsgId);
+  host.finishTurn('cond-a', 'turn three');
+  assert.equal((await sse.next('announce', (d) => d.text === 'turn three')).data.turnSeq, 6);
+});
+
+test('a replayed turn is silent even when its new _seq is higher than the handled one', async (t) => {
+  const { host, app, sse } = await setup(t);
+  host.finishTurn('cond-a', 'already heard', { notify: false });
+  await app.deps.announcer.reconcile();
+  const heard = app.deps.state.get();
+  // Replay under shifted numbering: two extra events up front.
+  host.resetRing('cond-a');
+  host.state.events['cond-a'] = [{ kind: 'tool_use', _seq: 1 }, { kind: 'tool_use', _seq: 2 }, ...host.state.events['cond-a'].map((ev) => ({ ...ev, _seq: ev._seq + 2 }))];
+  await app.deps.announcer.reconcile();
+  await settle(app, sse);
+  assert.equal(announces(sse).length, 1);
+  assert.equal(app.deps.state.get().lastHandledTurnSeq, heard.lastHandledTurnSeq + 2);
+});
+
+test('a turn that said nothing is announced even after an announced turn', async (t) => {
+  const { host, sse } = await setup(t);
+  host.finishTurn('cond-a', 'talked');
+  await sse.next('announce');
+  host.addEvent('cond-a', { kind: 'turn_end', isError: true });
+  host.broadcast({ t: 'turn_notification', id: 'cond-a' });
+  const ev = await sse.next('announce', (d) => d.isError);
+  assert.equal(ev.data.turnSeq, 3);
+});
+
+test('a long reply keeps the questions whole and cuts the prose before them', async (t) => {
+  const { host, sse } = await setup(t);
+  host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, prose: 'word '.repeat(2000) });
+  const ev = await sse.next('announce');
+  assert.ok(ev.data.text.length <= 4000);
+  assert.match(ev.data.text, /…\n--- questions ---\n1\. Which database\?/);
+  assert.ok(ev.data.text.endsWith('   - Lint: style\n   - Test: unit'), 'every option survives');
+});
+
+test('switching target records the msgId of its last finished turn', async (t) => {
+  const { host, app } = await setup(t, { events: { 'cond-b': [{ kind: 'assistant_message', msgId: 'old-msg', message: { content: [{ type: 'text', text: 'old' }] } }, { kind: 'turn_end' }] } });
+  await app.deps.service.setTarget('cond-b');
+  assert.equal(app.deps.state.get().lastHandledMsgId, 'old-msg');
+  await app.deps.service.setTarget('cond-a');
+  assert.equal(app.deps.state.get().lastHandledMsgId, null);
+  assert.equal(mcpReads(host).length, 0);
 });

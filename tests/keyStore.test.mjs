@@ -83,11 +83,18 @@ test('stateStore round-trips, persists 0600 and rejects corrupt state', async (t
   const { root, config } = await setup();
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const s1 = createStateStore({ dir: config.dataDir });
-  assert.deepEqual(await s1.load(), { activeTargetId: null, lastHandledTurnSeq: -1 });
+  assert.deepEqual(await s1.load(), { activeTargetId: null, lastHandledTurnSeq: -1, lastHandledMsgId: null });
   await Promise.all([s1.update({ activeTargetId: 'a' }), s1.update({ lastHandledTurnSeq: 7 })]);
   assert.equal((await fs.stat(s1.file)).mode & 0o777, 0o600);
   const s2 = createStateStore({ dir: config.dataDir });
-  assert.deepEqual(await s2.load(), { activeTargetId: 'a', lastHandledTurnSeq: 7 });
+  assert.deepEqual(await s2.load(), { activeTargetId: 'a', lastHandledTurnSeq: 7, lastHandledMsgId: null });
+  // A state.json written before lastHandledMsgId existed still loads; the id round-trips; a non-string id is corrupt.
+  await fs.writeFile(s1.file, JSON.stringify({ activeTargetId: 'a', lastHandledTurnSeq: 7 }));
+  assert.deepEqual(await createStateStore({ dir: config.dataDir }).load(), { activeTargetId: 'a', lastHandledTurnSeq: 7, lastHandledMsgId: null });
+  await s2.update({ lastHandledMsgId: 'msg_1' });
+  assert.equal((await createStateStore({ dir: config.dataDir }).load()).lastHandledMsgId, 'msg_1');
+  await fs.writeFile(s1.file, JSON.stringify({ activeTargetId: 'a', lastHandledTurnSeq: 7, lastHandledMsgId: 5 }));
+  await assert.rejects(createStateStore({ dir: config.dataDir }).load(), { code: 'STORE_CORRUPT' });
   await fs.writeFile(s1.file, JSON.stringify({ activeTargetId: 3, lastHandledTurnSeq: 'x' }));
   await assert.rejects(s2.load(), { code: 'STORE_CORRUPT' });
 });
@@ -100,8 +107,8 @@ test('interleaved stateStore updates leave the file at the last update', async (
   const updates = [];
   for (let i = 0; i < 50; i++) updates.push(store.update(i % 2 ? { lastHandledTurnSeq: i } : { activeTargetId: `c-${i}` }));
   await Promise.all(updates);
-  assert.deepEqual(JSON.parse(await fs.readFile(store.file, 'utf8')), { activeTargetId: 'c-48', lastHandledTurnSeq: 49 });
-  assert.deepEqual(store.get(), { activeTargetId: 'c-48', lastHandledTurnSeq: 49 });
+  assert.deepEqual(JSON.parse(await fs.readFile(store.file, 'utf8')), { activeTargetId: 'c-48', lastHandledTurnSeq: 49, lastHandledMsgId: null });
+  assert.deepEqual(store.get(), { activeTargetId: 'c-48', lastHandledTurnSeq: 49, lastHandledMsgId: null });
   assert.deepEqual((await fs.readdir(config.dataDir)).sort(), ['state.json'], 'no temp files left');
 });
 
@@ -127,5 +134,5 @@ test('stateStore writes land in update order even when writes finish out of orde
   }
   await all;
   assert.equal(maxInFlight, 1, 'one write in flight at a time');
-  assert.deepEqual(JSON.parse(disk), { activeTargetId: null, lastHandledTurnSeq: 19 });
+  assert.deepEqual(JSON.parse(disk), { activeTargetId: null, lastHandledTurnSeq: 19, lastHandledMsgId: null });
 });

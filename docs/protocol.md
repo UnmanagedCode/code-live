@@ -53,7 +53,7 @@ Each frame is `id: <boot>-<n>` / `event: <name>` / `data: <json>`. `<boot>` is r
 |---|---|---|
 | `target` | `{sessionId, title}` or `null` | on connect (**no id**; the current target, or `null` unless it is a live conductor row the host confirms), and on every target change |
 | `host` | `{connected:boolean}` | on connect (no id), and when the backend's host `/ws` link opens or closes |
-| `announce` | `{sessionId, title, text, turnSeq, isError}` | when the active target finishes a turn. `text` is at most 4000 chars, or `(turn finished with no text reply)` |
+| `announce` | `{sessionId, title, text, turnSeq, isError, ask}` | when the active target finishes a turn. `text` is at most 4000 chars, or `(turn finished with no text reply)`. `ask` is `{kind:"question", count}` (AskUserQuestion pending; `text` holds the `--- questions ---` section), `{kind:"plan", planPath:string\|null}` (ExitPlanMode pending), or `null` |
 
 - **Replay:** the backend keeps the last 20 id-bearing events.
   - A request with `Last-Event-ID` from this process gets every ring event after it.
@@ -70,9 +70,12 @@ The declarations are `DECLARATIONS` in `src/tools.js`, with parameter types in G
 | `list_conductor_sessions` | none |
 | `create_conductor_session` | none |
 | `send_to_conductor` | `text` STRING (required, non-empty), `session` STRING (optional: conductor id or exact title, case-insensitive) |
-| `read_conductor_messages` | `session` STRING (optional), `count` INTEGER (optional, 1–10, default 1) |
+| `read_conductor_messages` | `session` STRING (optional), `count` INTEGER (optional, 1–10) |
+| `answer_conductor_question` | `answers` ARRAY (required) of OBJECT `{choices: ARRAY<STRING>, text: STRING, note: STRING}`; entry *n* answers question *n*. A choice is an option number or its words (numbers are also accepted) |
+| `approve_conductor_plan` | `confirmed` BOOLEAN (required; must be `true`), `feedback` STRING (optional) |
+| `reject_conductor_plan` | `feedback` STRING (optional) |
 
-An omitted `session` (or one that is empty or whitespace) means the active target.
+An omitted `session` (or one that is empty or whitespace) means the active target. The answer, approve and reject tools act on the active target only.
 
 ### Tool results
 
@@ -90,7 +93,10 @@ A session summary is `{sessionId, title, status, lastResponseAt}`. `status` is t
 | `list_conductor_sessions` | `{ok:true, sessions:[summary + active:boolean], activeTarget:{sessionId,title}\|null}` |
 | `create_conductor_session` | `{ok:true, session:summary, activeTargetChanged:true, activeTarget:{sessionId,title}}` |
 | `send_to_conductor` | `{ok:true, sessionId, title, delivered:true, note:"The reply will be announced when the conductor finishes its turn."}`, plus `activeTargetChanged:true, activeTarget` when the target switched |
-| `read_conductor_messages` | `{ok:true, sessionId, title, messages:[{text}]}`: oldest first, each ≤ 4000 chars. Only assistant messages with non-empty text blocks count |
+| `read_conductor_messages` | `{ok:true, sessionId, title, messages:[{text, hasPlan?, planPath?, questionCount?}]}`: oldest first, each `text` ≤ 4000 chars. See [reading messages](#reading-messages) |
+| `answer_conductor_question` | `{ok:true, sessionId, title, delivered:true, answered:[{question, answer}], note}`; `question` is 1-based and `answer` is the label list or the free text that was sent |
+| `approve_conductor_plan` | `{ok:true, sessionId, title, mode, delivered:true, note}`; `mode` is the host's reported mode (`bypassPermissions`) |
+| `reject_conductor_plan` | same shape as approve; `mode` stays `plan` |
 
 Failures are `{ok:false, code, message}`:
 
@@ -108,7 +114,36 @@ Failures are `{ok:false, code, message}`:
 | `HOST_REFUSED` | the prompt ack was `ok:false` (e.g. `not running`) |
 | `ACK_TIMEOUT` | no ack within 10 s |
 | `HOST_DISCONNECTED` | the `/ws` link dropped before the ack |
+| `SESSION_NOT_READY` | the conductor row has no host session id yet (still spawning) |
+| `NO_PENDING_QUESTION` | the row shows no unanswered tool question |
+| `NO_PENDING_PLAN` | the row shows no unanswered tool plan, or the host's latest messages hold none; the message names which |
+| `CONFIRMATION_REQUIRED` | `approve_conductor_plan` without `confirmed: true` |
+| `INVALID_OPTION` | a choice matches no option, or several; carries `question` and `offered` |
+| `TOO_MANY_CHOICES` | several choices for a single-choice question; carries `question` and `offered` |
+| `ANSWER_COUNT_MISMATCH` | more answer entries than questions |
+| `HOST_MCP_ERROR` | `/mcp` returned a JSON-RPC error, an `isError` result, or an unreadable result; the message carries the host's text |
+| `HOST_TIMEOUT` | `/mcp` did not answer within 10 s. For answer, approve and reject the message says the call may have been delivered: do not resend without checking |
+| host refusal codes | a soft refusal from the host's tool, passed through with its code and reason, e.g. `SESSION_NOT_LIVE`, `NO_PENDING_QUESTION`, `EMPTY_ANSWER` |
 | `INTERNAL_ERROR` | unexpected failure (logged) |
+
+### Reading messages
+
+- **No `count`:** the host's default selection. The latest message is bonded back to the plan or questions message of its own turn, so `messages` can hold several entries.
+- **Explicit `count`:** exactly that many messages, literally and without bonding, as the host treats an explicit count.
+- Each `text` is the message body as the host renders it: prose, then a `--- plan ---` / `--- plan · saved to <path> ---` section and a `--- questions ---` section (`N. <question> (multiSelect: <bool>) · header: <h>`, then `   - <label>: <description>` per option) in the order they occurred. The host's `--- message i/N … ---` boundary line is dropped.
+- `hasPlan`, `planPath` and `questionCount` appear only on the message that carries them.
+- A `text` over 4000 chars keeps a trailing questions section whole and cuts the prose before it; anything else is cut from the end.
+- If the `/mcp` read fails, or the session has no host session id yet, the result is the last `count` (default 1) assistant text messages from the events route, as `[{text}]`, and the failure is logged.
+
+### Answering and deciding
+
+- **Pending gates** use the session row's `awaitingUser` / `awaitingUserSource`, because the host's `answer_question` and `approve_plan` do not check that anything is pending. A question needs `awaitingUser === "question"` and `awaitingUserSource === "tool"`. A plan needs `"plan"` and `"tool"`, and a fresh `get_recent_messages` that has a message with `hasPlan`.
+- **Choice resolution**, first match wins: exact label, option number (`2`, `option 2`), label equal after folding case, whitespace and punctuation, equal with a trailing parenthetical such as ` (Recommended)` dropped, then a unique partial match. No match, or several at one step, is `INVALID_OPTION`.
+- The question structure comes from the newest `user_question` event (`GET /api/instances/:id/events`). If none is found, choices pass through to the host unchanged.
+- **Retry:** when the host answers `INVALID_OPTION` with its `offered` labels, the spoken words are resolved once against those labels and the call is repeated once. A second refusal is returned as `INVALID_OPTION` with `question` and `offered`.
+- **Approval:** `confirmed` must be exactly `true`, else `CONFIRMATION_REQUIRED` with no host call at all. The host switches a plan-mode conductor to `bypassPermissions` on approval. Reject keeps plan mode.
+- Missing trailing answer entries are skipped; extra entries are `ANSWER_COUNT_MISMATCH`.
+- A failed result may add `question` (1-based), `offered` (labels) and, for `ANSWER_COUNT_MISMATCH`, `expected` and `got`.
 
 If a send switched the target and then failed, its message ends with `("<title>" is now the active target.)`.
 
@@ -122,7 +157,21 @@ All calls go to `$CONDUCTOR_URL`, with a 5 s timeout for REST.
 | create a conductor | `POST /api/projects/.conduct/ensure` (no body), then `POST /api/instances` with `{"project":".conduct","role":"conductor","temp":true,"mode":"bypassPermissions"}` → 201 summary |
 | read events | `GET /api/instances/:id/events?limit=500`. Uses `kind`/`_seq`, `assistant_message.message.content[].{type,text}` and `turn_end.isError` |
 | send a prompt | WS `/ws`: `{"t":"prompt","id":"<instance id>","text":"…","reqId":"code-live-<n>"}` → `{"t":"ack","reqId","ok","error"?}` |
-| turn ends | WS `/ws` broadcast `{"t":"turn_notification","id","project","isError","stopReason","cost"}`. Other frame types are ignored |
+| turn ends | WS `/ws` broadcast `{"t":"turn_notification","id","project","isError","stopReason","cost"}` |
+| instance list changed | WS `/ws` broadcast `{"t":"instances",…}`. Only its arrival matters: the row is re-read over REST. Other frame types are ignored |
+| instance row fields used | `id`, `project`, `sessionId` (the host's public session id, `null` while spawning; the `/mcp` handle), `awaitingUser` (`"question"` \| `"plan"`), `awaitingUserSource` (`"tool"` for AskUserQuestion / ExitPlanMode), `lastResponseAt`, plus the status fields above |
+| MCP tools | `POST /mcp`, 10 s timeout, stateless: one `{"jsonrpc":"2.0","id":<n>,"method":"tools/call","params":{"name","arguments"}}` per request, no `initialize`. Only `src/hostMcp.js` makes it |
+
+### `/mcp` tools
+
+The reply is `{result:{content:[{type:"text",text}…], isError?}}` or `{error:{code,message}}`. A soft refusal is `content[0]` holding JSON `{ok:false, code, reason, …}` with no `isError`; `isError:true` carries prose in `content[0]`. All `sessionId` arguments are the row's `sessionId`.
+
+| tool | arguments | used for |
+|---|---|---|
+| `get_recent_messages` | `sessionId`, optional `count` | `content[0]` is metadata JSON `{messages:[{msgId, hasPlan?, planPath?, questionCount?, …}], …}`; `content[k+1]` is the raw body of `messages[k]`. No `count` bonds the default selection; `count` is literal |
+| `answer_question` | `sessionId`, `answers` (0-based, one per question: `{option}`, `{options}`, `{text}` or `{}`, plus optional `note`) | answering; refusals `INVALID_OPTION` (with `questionIndex`, 0-based, and `offered`), `NOT_MULTISELECT`, `ANSWER_COUNT_MISMATCH`, `EMPTY_ANSWER` |
+| `approve_plan` | `sessionId`, optional `feedback` | approving; returns `{sessionId, mode, sentText}` |
+| `reject_plan` | `sessionId`, optional `feedback` | rejecting; returns `{sessionId, mode, sentText}` |
 
 ## Gemini
 

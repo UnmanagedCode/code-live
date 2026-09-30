@@ -6,7 +6,7 @@
 browser (Code Live page)                       code-live backend (node:http)            code-conductor host
 ┌──────────────────────────┐   api/…, SSE     ┌──────────────────────────────┐  REST    ┌──────────────┐
 │ app.js wiring            │ ───────────────▶ │ routes → service / gemini    │ ───────▶ │ /api/…       │
-│ liveSession.js ──────────┼──┐              │ announcer ◀── ccLink (/ws) ◀─┼───────── │ /ws          │
+│ liveSession.js ──────────┼──┐              │ announcer ◀── ccLink (/ws) ◀─┼───────── │ /ws, /mcp    │
 └──────────────────────────┘  │ wss (token)   └──────────────┬───────────────┘          └──────────────┘
                               ▼                              │ auth_tokens (x-goog-api-key)
                         Gemini Live  ◀───────────────────────┘
@@ -25,15 +25,17 @@ browser (Code Live page)                       code-live backend (node:http)    
 | `src/config.js` | `loadConfig(env)`: env → config; throws on a missing `PROJECTS_ROOT` / `CONDUCTOR_URL`; derives `dataDir`, `geminiWsUrl` and `hostWsUrl` |
 | `src/atomicFile.js` | `writeFileAtomic` (0600 temp file + rename + chmod, directory 0700) and `readJson` (`null` if absent, `STORE_CORRUPT` if unparseable) |
 | `src/keyStore.js` | `secrets.json`: `get` (the only key accessor, used only by `gemini.js`), `status`, `set` (validation), `clear` |
-| `src/stateStore.js` | `state.json`: `{activeTargetId, lastHandledTurnSeq}`; writes are serialized, so the file ends at the last `update` |
+| `src/stateStore.js` | `state.json`: `{activeTargetId, lastHandledTurnSeq, lastHandledMsgId}`; writes are serialized, so the file ends at the last `update` |
 | `src/models.js` | `MODELS`, the pinned catalog with per-model `thinkingLevel` / `toolBehavior` and the optional picker `hint`; `getModel` |
 | `src/tools.js` | `DECLARATIONS` (the single source for the Gemini setup and the dispatcher), `toolDeclarations(model)`, and `callTool` (validation + dispatch; never throws) |
 | `src/liveSetup.js` | `SYSTEM_PROMPT`, `buildSetup(modelId, resumeHandle)` |
 | `src/gemini.js` | `mintToken`: the auth_tokens call, expiry timestamps, and error scrubbing (any 8+ character run copied from the key) |
 | `src/ccApi.js` | host REST client; 404 → `SESSION_GONE`, other non-2xx → `HOST_HTTP_ERROR`, network/timeout → `HOST_UNAVAILABLE` |
-| `src/ccLink.js` | host `/ws` client: reconnect/backoff, reqId→ack pairing, and `turn_notification` / `open` / `close` events |
-| `src/hostEvents.js` | helpers shared by the service and announcer: `isConductor`, `summarize`, `assistantText`, `truncate`, `MAX_TEXT` |
-| `src/conductor.js` | the conductor service behind both the tools and the UI routes: `list`, `create`, `send`, `read`, `resolve`, `setTarget`, `clearTarget`, `getTarget` |
+| `src/ccLink.js` | host `/ws` client: reconnect/backoff, reqId→ack pairing, and `turn_notification` / `instances` / `open` / `close` events |
+| `src/hostMcp.js` | the only module that calls the host's bare `POST /mcp` (unsanctioned, outside the plugin API): `recentMessages`, `answerQuestion`, `approvePlan`, `rejectPlan`, and `pairMessages`. Errors carry `code` and `detail` (see [protocol](protocol.md#mcp-tools)) |
+| `src/answerMapping.js` | pure: `resolveAnswers` / `remapQuestion` map spoken choices to the host's exact labels; `describeAnswers` |
+| `src/hostEvents.js` | helpers shared by the service and announcer: `isConductor`, `summarize`, `assistantText`, `truncate`, `truncateBody`, `toolAsk`, `lastAssistantMsgId`, `MAX_TEXT` |
+| `src/conductor.js` | the conductor service behind both the tools and the UI routes: `list`, `create`, `send`, `read`, `answer`, `approve`, `reject`, `resolve`, `setTarget`, `clearTarget`, `getTarget` |
 | `src/announcer.js` | turn-end reconciliation → SSE `announce`; target baselines |
 | `src/sse.js` | SSE hub: boot-scoped ids, a 20-event replay ring, keepalive |
 | `src/http.js` | security headers, JSON body reading, the static allowlist |
@@ -48,7 +50,7 @@ browser (Code Live page)                       code-live backend (node:http)    
 | `public/api.js` | backend client (relative URLs, `cache:'no-store'`) |
 | `public/transcript.js` | transcript rendering, merging streamed transcription chunks |
 | `public/settings.js`, `public/targetPicker.js` | the Settings pane and the target picker |
-| `public/announcements.js` | SSE → transcript and `sendText`; `ANNOUNCE_PREFIX` |
+| `public/announcements.js` | SSE → transcript and `sendText`; `ANNOUNCE_PREFIX`, `ASK_QUESTION_MARK`, `ASK_PLAN_MARK` and the footer line for an `ask` |
 | `public/audio.js`, `public/player.js`, `public/mic-worklet.js` | PCM conversion, `createChunker` (100 ms chunk buffering), gapless 24 kHz playback, the `pcm-capture` worklet |
 | `public/dom.js` | the `el(tag, props, children)` builder; non-node children become text nodes |
 
@@ -59,9 +61,10 @@ Everything lives under `$PROJECTS_ROOT/.code-live/` (directory mode 0700). The p
 | file | contents | mode |
 |---|---|---|
 | `secrets.json` | `{"geminiApiKey":"…"}` | 0600 |
-| `state.json` | `{"activeTargetId":string\|null, "lastHandledTurnSeq":number}` | 0600 |
+| `state.json` | `{"activeTargetId":string\|null, "lastHandledTurnSeq":number, "lastHandledMsgId":string\|null}` | 0600 |
 
 - Both files are written atomically: a temp file `.<name>.<pid>.<n>.tmp`, then a rename.
+- A `state.json` without `lastHandledMsgId` loads it as `null`; a non-string value is `STORE_CORRUPT`.
 - A malformed file throws `STORE_CORRUPT`; it is never treated as empty.
 - The backend fails to start if `state.json` is corrupt.
 
@@ -78,20 +81,30 @@ Everything lives under `$PROJECTS_ROOT/.code-live/` (directory mode 0700). The p
 
 ## Announcer
 
-`reconcile()` is the only path that announces, and it is idempotent by `_seq`:
+Reconciling is the only path that announces, and it is idempotent by the turn's `_seq` together with the msgId of its last assistant message:
 
 1. It confirms the persisted target is a live conductor row in `GET /api/instances`. A missing row or a non-`.conduct` row clears the target (SSE `target: null`), so a worker is never announced. If the host is unreachable, it logs and stops.
-2. It reads the target's trailing 500 events.
-3. It takes the newest `turn_end` with `_seq > lastHandledTurnSeq`; with none, it stops.
-4. It persists that seq.
-5. It publishes the last non-empty assistant text with a lower `_seq`.
+2. It reads the target's trailing 500 events. A `lastSeq` below `lastHandledTurnSeq` means the host reset the ring (rewind, prune, respawn), so the handled seq counts as `-1` for this pass.
+3. It takes the newest `turn_end` with `_seq` above the handled seq; with none, it stops.
+4. `msgId` is the last assistant message inside that turn. If it equals `lastHandledMsgId`, the turn is a replay of one already announced: the new seq is persisted and nothing is published. A turn with no `msgId` never matches.
+5. It reads the content (below).
+6. It persists `{lastHandledTurnSeq, lastHandledMsgId}` and publishes `announce`.
 
 A 404 clears the target (SSE `target: null`); other errors are logged.
+
+**Content** comes from `hostMcp.recentMessages(row.sessionId)`:
+- `text` is the returned bodies joined with newlines, so a turn's plan or questions are included. `ask` is `{kind:"question", count}` or `{kind:"plan", planPath}` only when the row also shows an unanswered tool ask of that kind (`toolAsk`), else `null`.
+- The text is used only if the newest returned message has the turn's `msgId`. If a later turn has already spoken, the turn's own text is read from the events instead, with `ask: null`.
+- If the read fails, or the row has no `sessionId` yet, the last assistant text from the events is used with `ask: null`, and the failure is logged.
+- Over 4000 characters, `truncateBody` keeps a trailing `--- questions ---` section whole and cuts the prose before it; anything else is cut from the end.
 
 **Triggers:**
 - a `turn_notification` whose `id` is the active target;
 - every host-link `open`;
-- backend startup.
+- backend startup;
+- an `instances` frame (`reconcileAsk`), for a conductor the host stopped notifying about (it sends no `turn_notification` for a conductor that holds an armed wake on a worker).
+
+`reconcileAsk` is coalesced to one queued run and does nothing unless the target row shows an unanswered tool ask whose `awaitingUser:lastResponseAt` differs from the last turn announced or replayed. It announces only if the content read carries an `ask`; otherwise it changes no state, so a turn the host deliberately suppressed stays silent.
 
 Duplicate triggers therefore never double-announce, and a turn missed during a disconnect or a restart is announced once.
 
@@ -122,8 +135,11 @@ Run with `npm test`, which is `node tests/run.mjs`: the `node:test` runner drive
 - **Fakes:**
   - `tests/fakes/fakeGemini.mjs` fakes the auth_tokens mint (with an injectable failure) and the Live socket. It checks single-use tokens, sends binary frames, and records client messages. `session(i)` / `next(pred)` / `closed` let tests await specific traffic, and `setConnectMode('reject')` makes resume attempts fail.
   - `tests/fakes/fakeHost.mjs` fakes the instance, ensure and events routes, plus `/ws` prompt/ack. Ack modes are `ok` / `refuse` / `silent`. It also has `broadcast`, `dropConnections`, `onPrompt` hooks and `finishTurn(id, text)`.
+  - Its `POST /mcp` checks the JSON-RPC request shape, records `mcpCalls`, answers `get_recent_messages` from the instance's events (bonding like the host) and takes handlers for the other tools through `setMcp(name, fn)` with the `mcpOk` / `mcpSoft` / `mcpThrown` envelopes. `finishAsk(id, {kind, …})` ends a turn on a question or plan and sets the row's `awaitingUser*` fields; `resetRing(id)` renumbers the events as a respawn does; `setRow` patches a row.
 - **Harness:** `tests/helpers.mjs`' `startApp()` builds a real server through `buildDeps` with a fresh temp `PROJECTS_ROOT` and short link timings. It also provides an SSE client and `SENTINEL_KEY`; tests use only that sentinel key.
 - **Frontend:** `tests/dom.mjs` installs happy-dom globals and imports the real `public/` modules.
 - **Waits:** tests wait on observable outcomes (an SSE event, a received frame, a published marker), never on fixed sleeps.
 - **Coverage guard:** `tests/nondisclosure.test.mjs` compares its probe list against `ROUTES`, so a new route fails until it is checked for key leaks.
-- **Real smoke test:** `tests/real-gemini.test.mjs` is skipped unless `RUN_REAL_GEMINI=1`, and reads the key from `GEMINI_API_KEY`. Models in its `CONNECT_ONLY` set skip the tool-call step (see the README's known limitations).
+- **Real smoke tests:**
+  - `tests/real-gemini.test.mjs` is skipped unless `RUN_REAL_GEMINI=1`, and reads the key from `GEMINI_API_KEY`. Models in its `CONNECT_ONLY` set skip the tool-call step (see the README's known limitations).
+  - `tests/real-host.test.mjs` is skipped unless `RUN_REAL_HOST=1`. It takes `CONDUCTOR_URL` and `REAL_HOST_SESSION` and makes read-only `/mcp` calls.

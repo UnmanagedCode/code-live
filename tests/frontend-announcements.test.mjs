@@ -15,7 +15,7 @@ function fakeEventSource() {
 }
 
 async function setup(state) {
-  const { document, installAnnouncements, createTranscript, ANNOUNCE_PREFIX } = await loadDom('announcements.js', 'transcript.js');
+  const { document, installAnnouncements, createTranscript, ANNOUNCE_PREFIX, ASK_QUESTION_MARK, ASK_PLAN_MARK } = await loadDom('announcements.js', 'transcript.js');
   const root = document.createElement('div');
   const transcript = createTranscript(root);
   const es = fakeEventSource();
@@ -24,7 +24,7 @@ async function setup(state) {
   const hosts = [];
   const session = { state, sendText: (t) => sent.push(t) };
   installAnnouncements({ eventSource: es, transcript, session, targetPicker: { update: (t) => targets.push(t) }, hostIndicator: { set: (c) => hosts.push(c) } });
-  return { root, es, sent, targets, hosts, session, ANNOUNCE_PREFIX };
+  return { root, es, sent, targets, hosts, session, ANNOUNCE_PREFIX, ASK_QUESTION_MARK, ASK_PLAN_MARK };
 }
 
 test('announce while live: transcript entry plus injected update', async () => {
@@ -55,4 +55,53 @@ test('target and host events update their widgets', async () => {
   es.emit('host', { connected: false });
   assert.deepEqual(targets, [{ sessionId: 'c', title: 't' }, null]);
   assert.deepEqual(hosts, [true, false]);
+});
+
+test('a question announce ends with the AWAITING ANSWER line and labels the transcript entry', async () => {
+  const { root, es, sent, ASK_QUESTION_MARK } = await setup('live');
+  es.emit('announce', { sessionId: 'c', title: 'Alpha', text: 'Q\n--- questions ---\n1. Which?', turnSeq: 3, isError: false, ask: { kind: 'question', count: 2 } });
+  assert.deepEqual(sent, ['CONDUCTOR UPDATE from "Alpha":\nQ\n--- questions ---\n1. Which?\nAWAITING ANSWER: 2 question(s). Use answer_conductor_question.']);
+  assert.ok(sent[0].includes(ASK_QUESTION_MARK));
+  assert.equal(root.querySelector('.entry-label').textContent, 'Conductor · Alpha · question');
+  assert.equal(root.querySelector('.entry-body').textContent, 'Q\n--- questions ---\n1. Which?', 'the transcript body has no footer');
+});
+
+test('a plan announce ends with the AWAITING PLAN APPROVAL line, with the plan file when known', async () => {
+  const { root, es, sent, ASK_PLAN_MARK } = await setup('live');
+  es.emit('announce', { sessionId: 'c', title: 'Alpha', text: 'plan text', ask: { kind: 'plan', planPath: '/plans/p.md' } });
+  es.emit('announce', { sessionId: 'c', title: 'Alpha', text: 'inline plan', ask: { kind: 'plan', planPath: null } });
+  assert.deepEqual(sent, [
+    'CONDUCTOR UPDATE from "Alpha":\nplan text\nAWAITING PLAN APPROVAL (plan file: /plans/p.md).',
+    'CONDUCTOR UPDATE from "Alpha":\ninline plan\nAWAITING PLAN APPROVAL.',
+  ]);
+  assert.ok(sent.every((s) => s.includes(ASK_PLAN_MARK)));
+  assert.deepEqual([...root.querySelectorAll('.entry-label')].map((n) => n.textContent), ['Conductor · Alpha · plan', 'Conductor · Alpha · plan']);
+});
+
+test('an announce without an ask has no footer and no label suffix', async () => {
+  for (const ask of [undefined, null]) {
+    const { root, es, sent } = await setup('live');
+    es.emit('announce', { sessionId: 'c', title: 'Alpha', text: 'done', ask });
+    assert.deepEqual(sent, ['CONDUCTOR UPDATE from "Alpha":\ndone']);
+    assert.equal(root.querySelector('.entry-label').textContent, 'Conductor · Alpha');
+  }
+});
+
+test('the system prompt keys on both ask marks and on the approval confirmation', () => {
+  assert.ok(SYSTEM_PROMPT.includes('"AWAITING ANSWER"'));
+  assert.ok(SYSTEM_PROMPT.includes('"AWAITING PLAN APPROVAL"'));
+  assert.match(SYSTEM_PROMPT, /answer_conductor_question/);
+  assert.match(SYSTEM_PROMPT, /without permission prompts.*explicit yes.*confirmed true/s);
+  assert.match(SYSTEM_PROMPT, /INVALID_OPTION/);
+});
+
+test('hostile plan, question and title text renders as text, never as elements', async () => {
+  const evil = '<img src=x onerror=alert(1)><script>alert(2)</script>';
+  const { root, es, sent } = await setup('live');
+  es.emit('announce', { sessionId: 'c', title: evil, text: `plan ${evil}`, ask: { kind: 'plan', planPath: evil } });
+  es.emit('announce', { sessionId: 'c', title: evil, text: `--- questions ---\n1. ${evil}`, ask: { kind: 'question', count: 1 } });
+  assert.equal(root.querySelectorAll('img,script').length, 0);
+  assert.equal(root.querySelectorAll('.entry').length, 2);
+  assert.ok(root.textContent.includes(evil));
+  assert.equal(sent.length, 2);
 });
