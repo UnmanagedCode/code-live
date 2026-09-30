@@ -1,7 +1,9 @@
 // Pins: the browser Live client connects with a backend-minted token, decodes
 // binary frames into events, round-trips tool calls through the backend
 // (skipping cancelled ones), injects text as realtimeInput, and resumes with
-// the latest handle on goAway or a drop until it gives up.
+// the latest handle on goAway or a drop until it gives up. The mic pause gates
+// audio only (one audioStreamEnd, text still flows), survives reconnects on the
+// same handle, and is cleared by every state other than live/reconnecting.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createLiveSession } from '../public/liveSession.js';
@@ -101,10 +103,8 @@ test('sendText and sendAudio frame realtimeInput; nothing is sent unless live', 
   const s = await gemini.session(0);
   session.sendText('CONDUCTOR UPDATE from "x":\nhi');
   session.sendAudio('AQID');
-  session.endAudio();
   assert.deepEqual(await s.next((m) => m.realtimeInput?.text), { realtimeInput: { text: 'CONDUCTOR UPDATE from "x":\nhi' } });
   assert.deepEqual(await s.next((m) => m.realtimeInput?.audio), { realtimeInput: { audio: { data: 'AQID', mimeType: 'audio/pcm;rate=16000' } } });
-  assert.deepEqual(await s.next((m) => m.realtimeInput?.audioStreamEnd), { realtimeInput: { audioStreamEnd: true } });
   assert.equal(s.messages.some((m) => JSON.stringify(m).includes('too early') || JSON.stringify(m).includes('AAAA')), false);
 });
 
@@ -241,4 +241,152 @@ test('a setup timer that fires synchronously still fails and closes the socket',
   assert.equal(events.at(-1).detail, 'Gemini did not complete setup within 15 s');
   assert.equal(sockets.length, 1);
   assert.ok(sockets[0].readyState >= 2, 'the socket is closing or closed');
+});
+
+const micEvents = (events) => events.filter((e) => e.type === 'mic').map((e) => e.paused);
+
+// Frames on one socket arrive in order: once the marker text is received, every
+// earlier frame is already in s.messages, so absence can be asserted.
+async function flushed(session, s, marker) {
+  session.sendText(marker);
+  await s.next((m) => m.realtimeInput?.text === marker);
+}
+const audioFrames = (s) => s.messages.filter((m) => m.realtimeInput?.audio).map((m) => m.realtimeInput.audio.data);
+const streamEnds = (s) => s.messages.filter((m) => m.realtimeInput?.audioStreamEnd).length;
+
+test('pauseMic sends one audioStreamEnd and drops audio until resumeMic; text still goes through', async (t) => {
+  // Pins: a pause gates the mic only (announcements are still spoken), sends
+  // audioStreamEnd exactly once, and leaves the socket, state and token alone.
+  const { gemini, events, session } = await setup(t);
+  await session.connect('gemini-3.8-live');
+  const s = await gemini.session(0);
+  session.sendAudio('AQID');
+  await s.next((m) => m.realtimeInput?.audio);
+  session.pauseMic();
+  session.pauseMic();
+  assert.equal(session.micPaused, true);
+  await s.next((m) => m.realtimeInput?.audioStreamEnd);
+  session.sendAudio('PAUSED');
+  session.sendText('CONDUCTOR UPDATE from "x":\nhi');
+  await s.next((m) => m.realtimeInput?.text);
+  session.resumeMic();
+  assert.equal(session.micPaused, false);
+  session.sendAudio('BACK');
+  await s.next((m) => m.realtimeInput?.audio?.data === 'BACK');
+  assert.equal(s.messages.some((m) => JSON.stringify(m).includes('PAUSED')), false);
+  assert.equal(streamEnds(s), 1);
+  assert.deepEqual(states(events), ['connecting', 'live']);
+  assert.deepEqual(micEvents(events), [true, false]);
+  assert.equal(mints(gemini).length, 1);
+  assert.equal(gemini.sessions.length, 1);
+});
+
+test('a pause survives goAway: the resumed socket stays gated until resumeMic', async (t) => {
+  // Pins: the pause intent outlives reconnect() and never goes through
+  // disconnect(), so the resumption handle is still used.
+  const { gemini, events, session } = await setup(t);
+  await session.connect('gemini-3.8-live');
+  const s0 = await gemini.session(0);
+  s0.send({ sessionResumptionUpdate: { newHandle: 'h1', resumable: true } });
+  s0.send({ serverContent: { turnComplete: true } });
+  await waitFor(() => events.some((e) => e.type === 'turn_complete'));
+  session.pauseMic();
+  s0.send({ goAway: { timeLeft: '5s' } });
+  const s1 = await gemini.session(1);
+  await waitFor(() => session.state === 'live' && states(events).includes('reconnecting'));
+  assert.equal(session.micPaused, true);
+  assert.deepEqual(mints(gemini)[1].body.bidiGenerateContentSetup.sessionResumption, { handle: 'h1' });
+  session.sendAudio('X');
+  await flushed(session, s1, 'marker');
+  assert.deepEqual(audioFrames(s1), []);
+  assert.equal(streamEnds(s1), 0);
+  session.resumeMic();
+  session.sendAudio('Y');
+  await s1.next((m) => m.realtimeInput?.audio?.data === 'Y');
+  assert.deepEqual(micEvents(events), [true, false]);
+});
+
+test('a pause survives an unexpected close with a handle', async (t) => {
+  // Pins: the close-handler reconnect path keeps the pause, like goAway.
+  const { gemini, events, session } = await setup(t);
+  await session.connect('gemini-3.8-live');
+  const s0 = await gemini.session(0);
+  s0.send({ sessionResumptionUpdate: { newHandle: 'h1', resumable: true } });
+  s0.send({ serverContent: { turnComplete: true } });
+  await waitFor(() => events.some((e) => e.type === 'turn_complete'));
+  session.pauseMic();
+  s0.close(1011, 'server restart');
+  const s1 = await gemini.session(1);
+  await waitFor(() => session.state === 'live' && states(events).includes('reconnecting'));
+  assert.equal(session.micPaused, true);
+  session.sendAudio('X');
+  await flushed(session, s1, 'marker');
+  assert.deepEqual(audioFrames(s1), []);
+  assert.equal(streamEnds(s1), 0);
+});
+
+test('pausing while reconnecting is kept when the resume lands', async (t) => {
+  // Pins: a pause set with no socket sends nothing and is kept once the resume completes.
+  const { gemini, events, session } = await setup(t, {}, { setupTimeoutMs: 30 });
+  await session.connect('gemini-3.8-live');
+  const s0 = await gemini.session(0);
+  s0.send({ sessionResumptionUpdate: { newHandle: 'h1', resumable: true } });
+  gemini.setConnectMode('silent');
+  s0.send({ goAway: { timeLeft: '1s' } });
+  await waitFor(() => session.state === 'reconnecting');
+  session.pauseMic();
+  gemini.setConnectMode('ok');
+  await waitFor(() => session.state === 'live');
+  assert.equal(session.micPaused, true);
+  assert.deepEqual(micEvents(events), [true]);
+  session.sendAudio('X');
+  const last = await gemini.session(gemini.sessions.length - 1);
+  await flushed(session, last, 'marker');
+  for (const sock of gemini.sessions) {
+    assert.deepEqual(audioFrames(sock), []);
+    assert.equal(streamEnds(sock), 0);
+  }
+});
+
+test('pauseMic and resumeMic are no-ops unless live or reconnecting', async (t) => {
+  // Pins: nothing to pause before a session exists; no event, no stale flag.
+  const { events, session } = await setup(t);
+  session.pauseMic();
+  session.resumeMic();
+  assert.equal(session.micPaused, false);
+  assert.deepEqual(micEvents(events), []);
+});
+
+test('disconnect, a failed resume and a no-handle close all clear the pause', async (t) => {
+  // Pins: a pause lasts only through live/reconnecting; any other state ends it.
+  const { gemini, events, session } = await setup(t);
+  // A: disconnect
+  await session.connect('gemini-3.8-live');
+  session.pauseMic();
+  session.disconnect();
+  assert.equal(session.micPaused, false);
+  assert.deepEqual(micEvents(events), [true, false]);
+  await session.connect('gemini-3.8-live');
+  const s1 = await gemini.session(1);
+  session.sendAudio('A');
+  await s1.next((m) => m.realtimeInput?.audio?.data === 'A');
+  // B: resume fails
+  s1.send({ sessionResumptionUpdate: { newHandle: 'h1', resumable: true } });
+  s1.send({ serverContent: { turnComplete: true } });
+  await waitFor(() => events.some((e) => e.type === 'turn_complete'));
+  session.pauseMic();
+  gemini.setConnectMode('reject');
+  s1.send({ goAway: { timeLeft: '1s' } });
+  await waitFor(() => session.state === 'error');
+  assert.equal(session.micPaused, false);
+  // C: close without a handle
+  gemini.setConnectMode('ok');
+  await session.connect('gemini-3.8-live');
+  const s = await gemini.session(gemini.sessions.length - 1);
+  session.pauseMic();
+  assert.equal(session.micPaused, true);
+  s.close(1011, 'boom');
+  await waitFor(() => session.state === 'error');
+  assert.equal(session.micPaused, false);
+  assert.deepEqual(micEvents(events), [true, false, true, false, true, false]);
 });

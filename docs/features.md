@@ -6,8 +6,8 @@ User-facing behavior of the Code Live page and its voice tools. Wire shapes are 
 
 | region | contents |
 |---|---|
-| status bar | session state pill (`idle`, `connecting`, `live`, `reconnecting`, `error`) and the host indicator (`Host connected` / `Host disconnected`: the backend's link to code-conductor's `/ws`) |
-| controls | **Model** select (the pinned models from `GET api/models`; a model with a `hint` shows it after the label, e.g. `Gemini 3.8 Live Extended Thinking (tool calls unreliable)`), **Connect**, **Disconnect** |
+| status bar | session state pill (`idle`, `connecting`, `live`, `reconnecting`, `error`) the `Mic paused` pill (shown only while the mic is paused), and the host indicator (`Host connected` / `Host disconnected`: the backend's link to code-conductor's `/ws`) |
+| controls | **Model** select (the pinned models from `GET api/models`; a model with a `hint` shows it after the label, e.g. `Gemini 3.8 Live Extended Thinking (tool calls unreliable)`), **Connect**, **Pause mic** / **Resume mic**, **Disconnect** |
 | target picker | **Conductor** select listing live conductor sessions as `<title> (<status>)` (`<status>` is the run state `list_conductor_sessions` reports: [protocol](protocol.md#tool-results)), plus `— no active conductor —`; **Refresh** reloads it. Choosing one sets the active target |
 | transcript | You / Gemini transcription bubbles, tool calls and results as JSON, conductor announcements, status and error lines |
 | Settings (collapsible) | Gemini API key: password field, **Save**, **Clear**, and the status `Key set (••••<last 4>)` or `No key set` |
@@ -21,6 +21,17 @@ User-facing behavior of the Code Live page and its voice tools. Wire shapes are 
 - **Disconnect** closes the session, stops the microphone and returns to `idle`. It is enabled while `connecting` and `reconnecting` too, and abandons the attempt in progress.
 - When Gemini announces a connection end (`goAway`, about every 10 minutes) or the socket drops unexpectedly, the page shows `reconnecting` and resumes the same conversation on a fresh token. After 3 failed attempts in a row, or with no resumption handle yet, it goes to `error`; press **Connect** to start over.
 - Without a stored key, Connect fails with `No Gemini API key is set; add one in Settings`.
+
+## Pausing the microphone
+
+- **Pause mic** is enabled while the session is `live` or `reconnecting`. It toggles to **Resume mic**, and the `Mic paused` pill shows while paused.
+- A pause stops sending your audio and tells Gemini the audio stream ended. The connection, the conversation and resumption are unaffected.
+- Gemini finishes what it is saying, and conductor announcements are still spoken. You cannot interrupt Gemini by voice while paused.
+- The pause is kept across reconnects (`goAway` or a drop).
+- **Disconnect**, an `error`, or a new **Connect** clears it: every new session starts unpaused.
+- Pausing mid-sentence may make Gemini answer the part it heard.
+- The browser keeps the microphone open (its recording indicator stays on); audio captured while paused is discarded.
+- A long pause relies on the normal reconnect: if Gemini closes the socket before a resumption handle has arrived, the session goes to `error`.
 
 ## Voice tools
 
@@ -45,6 +56,6 @@ Failures come back to Gemini as `ok:false` with a code, and Gemini explains them
   - the target picker.
 - `read_conductor_messages` never changes it.
 - When the target changes, turns the session had already finished are marked as handled, so only new turns are announced.
-- When the active target finishes a turn, its last text reply appears in the transcript as a **Conductor · `<title>`** entry. While the session is `live`, it is also sent to Gemini as `CONDUCTOR UPDATE from "<title>":` followed by the text. Gemini reads a short reply in full and summarizes a long or code-heavy one. A turn with no text reply is announced as `(turn finished with no text reply)`. Replies are cut at 4000 characters.
+- When the active target finishes a turn, its last text reply appears in the transcript as a **Conductor · `<title>`** entry. While the session is `live` (including while the mic is paused), it is also sent to Gemini as `CONDUCTOR UPDATE from "<title>":` followed by the text. Gemini reads a short reply in full and summarizes a long or code-heavy one. A turn with no text reply is announced as `(turn finished with no text reply)`. Replies are cut at 4000 characters.
 - An announcement arriving while the session is not live stays in the transcript only; it is not spoken later.
 - If the active target's session disappears from code-conductor, the target is cleared and the picker shows `— no active conductor —`.

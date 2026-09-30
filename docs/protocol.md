@@ -158,8 +158,8 @@ The page connects to `wss://generativelanguage.googleapis.com/ws/google.ai.gener
 
 | message | when |
 |---|---|
-| `{"realtimeInput":{"audio":{"data":"<b64>","mimeType":"audio/pcm;rate=16000"}}}` | mic chunks (16-bit LE mono) |
-| `{"realtimeInput":{"audioStreamEnd":true}}` | `endAudio()` |
+| `{"realtimeInput":{"audio":{"data":"<b64>","mimeType":"audio/pcm;rate=16000"}}}` | mic chunks (16-bit LE mono) while the mic is not paused |
+| `{"realtimeInput":{"audioStreamEnd":true}}` | `pauseMic()` while live, once per pause |
 | `{"realtimeInput":{"text":"CONDUCTOR UPDATE from \"<title>\":\n<text>"}}` | announcements; does not interrupt current speech |
 | `{"toolResponse":{"functionResponses":[{"id","name","response":<tool result>}]}}` | after each tool call, unless cancelled |
 

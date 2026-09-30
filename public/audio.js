@@ -55,3 +55,27 @@ export function base64ToPcm16(b64) {
   const bytes = base64ToBytes(b64);
   return new Int16Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 2));
 }
+
+// Collects Float32Array frames and calls onChunk with one concatenated array
+// once at least `size` samples are held. clear() drops a partly filled chunk.
+export function createChunker(size, onChunk) {
+  let buf = [];
+  let len = 0;
+  return {
+    push(frame) {
+      buf.push(frame);
+      len += frame.length;
+      if (len < size) return;
+      const all = new Float32Array(len);
+      let off = 0;
+      for (const b of buf) { all.set(b, off); off += b.length; }
+      buf = [];
+      len = 0;
+      onChunk(all);
+    },
+    clear() {
+      buf = [];
+      len = 0;
+    },
+  };
+}

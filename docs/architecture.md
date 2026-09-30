@@ -41,14 +41,15 @@ browser (Code Live page)                       code-live backend (node:http)    
 
 | frontend file | responsibility |
 |---|---|
-| `public/app.js` | wiring only: builds the modules, connects the buttons, reflects session state, runs the mic (AudioWorklet → 100 ms chunks → 16 kHz PCM16 base64) and playback |
-| `public/liveSession.js` | DOM-free Gemini Live client: states, message → event mapping, tool round-trip, cancellation, resume, the bounded `setupComplete` wait (`setupTimeoutMs`, injectable `timers`), and `disconnect()` from any state |
+| `public/app.js` | wiring only: builds the modules, connects the buttons, reflects session state, runs the mic (AudioWorklet → 100 ms chunks → 16 kHz PCM16 base64, frames discarded while the mic is paused) and playback |
+| `public/liveSession.js` | DOM-free Gemini Live client: states, message → event mapping, tool round-trip, cancellation, reconnect (`reconnect()`), the mic pause flag (`pauseMic`/`resumeMic`/`micPaused`, kept across `live ⇄ reconnecting`, cleared on any other state), the bounded `setupComplete` wait (`setupTimeoutMs`, injectable `timers`), and `disconnect()` from any state |
+| `public/micControl.js` | Pause/Resume mic button and `Mic paused` pill, rendered from `session.state` + `session.micPaused` |
 | `public/sessionView.js` | session events → transcript and speaker; `isReplyEnd` (a `turnComplete` with `interactionStatus: IN_PROGRESS` doesn't end the bubble) |
 | `public/api.js` | backend client (relative URLs, `cache:'no-store'`) |
 | `public/transcript.js` | transcript rendering, merging streamed transcription chunks |
 | `public/settings.js`, `public/targetPicker.js` | the Settings pane and the target picker |
 | `public/announcements.js` | SSE → transcript and `sendText`; `ANNOUNCE_PREFIX` |
-| `public/audio.js`, `public/player.js`, `public/mic-worklet.js` | PCM conversion, gapless 24 kHz playback, the `pcm-capture` worklet |
+| `public/audio.js`, `public/player.js`, `public/mic-worklet.js` | PCM conversion, `createChunker` (100 ms chunk buffering), gapless 24 kHz playback, the `pcm-capture` worklet |
 | `public/dom.js` | the `el(tag, props, children)` builder; non-node children become text nodes |
 
 ## On-disk state

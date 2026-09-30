@@ -8,7 +8,8 @@ import { createLiveSession } from './liveSession.js';
 import { installAnnouncements } from './announcements.js';
 import { createPlayer } from './player.js';
 import { createSessionView } from './sessionView.js';
-import { downsample, floatToPcm16, pcm16ToBase64 } from './audio.js';
+import { installMicControl } from './micControl.js';
+import { createChunker, downsample, floatToPcm16, pcm16ToBase64 } from './audio.js';
 import { el } from './dom.js';
 
 const $ = (id) => document.getElementById(id);
@@ -35,11 +36,15 @@ const view = createSessionView({
   player: { enqueue: (b64) => player?.enqueue(b64), flush: () => player?.flush() },
 });
 const session = createLiveSession({ api, onEvent });
+// onEvent only fires after a user action, so it can reference micControl.
+const micControl = installMicControl({ button: $('pause'), indicator: $('mic'), session });
 
 function onEvent(ev) {
+  if (ev.type === 'mic') { micControl.render(); return; }
   if (ev.type !== 'state') { view.handle(ev); return; }
   $('state').textContent = ev.state;
   $('state').dataset.state = ev.state;
+  micControl.render();
   // Disconnect stays enabled while connecting/reconnecting so a stuck attempt can be abandoned.
   $('connect').disabled = !(ev.state === 'idle' || ev.state === 'error');
   $('disconnect').disabled = ev.state === 'idle' || ev.state === 'error';
@@ -54,19 +59,9 @@ async function startMic() {
   const source = audioCtx.createMediaStreamSource(stream);
   const node = new AudioWorkletNode(audioCtx, 'pcm-capture');
   const want = Math.round(audioCtx.sampleRate * CHUNK_SECONDS);
-  let buf = [];
-  let len = 0;
-  node.port.onmessage = ({ data }) => {
-    buf.push(data);
-    len += data.length;
-    if (len < want) return;
-    const all = new Float32Array(len);
-    let off = 0;
-    for (const b of buf) { all.set(b, off); off += b.length; }
-    buf = [];
-    len = 0;
-    session.sendAudio(pcm16ToBase64(floatToPcm16(downsample(all, audioCtx.sampleRate, 16000))));
-  };
+  const chunker = createChunker(want, (all) => session.sendAudio(pcm16ToBase64(floatToPcm16(downsample(all, audioCtx.sampleRate, 16000)))));
+  // A pause keeps the mic open but discards what it captures.
+  node.port.onmessage = ({ data }) => (session.micPaused ? chunker.clear() : chunker.push(data));
   source.connect(node);
   micStop = () => {
     node.port.onmessage = null;

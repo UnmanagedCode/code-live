@@ -2,7 +2,7 @@
 // (24 kHz PCM16 out) keep length, clamp and round-trip correctly.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { downsample, floatToPcm16, pcm16ToFloat, bytesToBase64, base64ToBytes, pcm16ToBase64, base64ToPcm16 } from '../public/audio.js';
+import { downsample, floatToPcm16, pcm16ToFloat, bytesToBase64, base64ToBytes, pcm16ToBase64, base64ToPcm16, createChunker } from '../public/audio.js';
 
 test('downsample keeps the rate ratio and interpolates', () => {
   const input = Float32Array.from({ length: 480 }, (_, i) => i / 480);
@@ -23,4 +23,20 @@ test('base64 round-trips bytes and PCM', () => {
   assert.equal(bytesToBase64(Uint8Array.from([104, 105])), 'aGk=');
   const pcm = Int16Array.from([1, -1, 32767, -32768]);
   assert.deepEqual([...base64ToPcm16(pcm16ToBase64(pcm))], [...pcm]);
+});
+
+test('createChunker emits size-sample chunks and clear drops a partial one', () => {
+  // Pins: nothing captured during a pause leaks into the first chunk after resume.
+  const chunks = [];
+  const c = createChunker(8, (all) => chunks.push([...all]));
+  c.push(Float32Array.from([1, 2, 3]));
+  c.push(Float32Array.from([4, 5, 6]));
+  assert.deepEqual(chunks, []);
+  c.push(Float32Array.from([7, 8, 9, 10]));
+  assert.deepEqual(chunks, [[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]]);
+  c.push(Float32Array.from([-1, -2, -3]));
+  c.clear();
+  c.push(Float32Array.from([1, 1, 1, 1, 1, 1, 1, 1]));
+  assert.deepEqual(chunks[1], [1, 1, 1, 1, 1, 1, 1, 1]);
+  assert.equal(chunks.length, 2);
 });
