@@ -21,7 +21,9 @@ export function createEventStream({
   let timer = null;
   let closed = false;
 
-  // Id-less frames arrive with an empty lastEventId and must not clear the last real one.
+  // A frame with no `id:` field inherits the last-seen id, so lastEventId is empty only on a
+  // fresh source that has seen none yet: the initial frames of a re-created source. The guard
+  // keeps those from clearing the last real id.
   const track = (fn) => (ev) => {
     if (ev.lastEventId) lastId = ev.lastEventId;
     fn(ev);
