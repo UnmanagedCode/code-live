@@ -263,6 +263,31 @@ test('disconnect while the worklet module never loads stops the track without wa
   assert.equal(streams.at(-1).tracks[0].stopped, true);
 });
 
+test('disconnect stops a completed capture: the track is stopped and the node released', async () => {
+  // Pins: Disconnect releases a finished capture in full. Counterfactual: a release
+  // that keeps the node's message handler or leaves it connected lets the next
+  // Connect's capture run alongside it, sending every frame twice.
+  const { node } = await connectLive();
+  $('disconnect').click();
+  assert.equal(streams.at(-1).tracks[0].stopped, true);
+  assert.equal(node.port.onmessage, null);
+  assert.equal(node.disconnected, true);
+});
+
+test('a start abandoned while getUserMedia is pending stops its track even if the worklet never loads', async () => {
+  // Pins: the staleness check right after getUserMedia. Counterfactual: without it
+  // the start goes on to await a load that never settles, holding the track live.
+  const d = deferred(fakeStream);
+  gum = () => d.promise;
+  loadModule = () => new Promise(() => {});
+  const before = streams.length;
+  await connectPending();
+  $('disconnect').click();
+
+  d.resolve(fakeStream());
+  await waitFor(() => streams.length > before && streams.at(-1).tracks[0].stopped, { what: 'abandoned track stopped' });
+});
+
 test('a rejected getUserMedia reports the error and the next live starts the mic', async () => {
   // Pins: a refused microphone is reported and does not wedge later starts.
   // Counterfactual: a claim that survives the rejection blocks the resume's start.

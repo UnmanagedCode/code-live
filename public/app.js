@@ -28,7 +28,7 @@ const hostIndicator = {
 
 let audioCtx = null;
 let player = null;
-let mic = null; // the current capture: claimed before the first await, { stop } once started
+let mic = null; // the current capture: claimed before the first await; its `stop` releases whatever has been acquired so far
 
 const view = createSessionView({
   transcript,
