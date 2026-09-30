@@ -44,12 +44,13 @@ browser (Code Live page)                       code-live backend (node:http)    
 | frontend file | responsibility |
 |---|---|
 | `public/app.js` | wiring only: builds the modules, connects the buttons, reflects session state, runs the mic (AudioWorklet → 100 ms chunks → 16 kHz PCM16 base64, frames discarded while the mic is paused) and playback |
-| `public/liveSession.js` | DOM-free Gemini Live client: states, message → event mapping, tool round-trip, cancellation, reconnect (`reconnect()`), the mic pause flag (`pauseMic`/`resumeMic`/`micPaused`, kept across `live ⇄ reconnecting`, cleared on any other state), the bounded `setupComplete` wait (`setupTimeoutMs`, injectable `timers`), and `disconnect()` from any state |
+| `public/liveSession.js` | DOM-free Gemini Live client: states, message → event mapping, tool round-trip, cancellation, reconnect (`reconnect()`), the mic pause flag (`pauseMic`/`resumeMic`/`micPaused`, kept across `live ⇄ reconnecting`, cleared on any other state), the bounded `setupComplete` wait (`setupTimeoutMs`, injectable `timers`), the spacing of resume attempts (`resumeDelayMs`, doubling, up to `maxResumeFailures`; a Disconnect during the wait ends the loop), and `disconnect()` from any state |
 | `public/micControl.js` | Pause/Resume mic button and `Mic paused` pill, rendered from `session.state` + `session.micPaused` |
 | `public/sessionView.js` | session events → transcript and speaker; `isReplyEnd` (a `turnComplete` with `interactionStatus: IN_PROGRESS` doesn't end the bubble) |
 | `public/api.js` | backend client (relative URLs, `cache:'no-store'`) |
 | `public/transcript.js` | transcript rendering, merging streamed transcription chunks |
 | `public/settings.js`, `public/targetPicker.js` | the Settings pane and the target picker |
+| `public/events.js` | `createEventStream`: an EventSource wrapper for `api/events` (same `addEventListener` surface). A native source stops for good when a reconnect gets a non-2xx reply, so on an `error` with `readyState` CLOSED it creates a new source after `retryMs` (doubling to `maxRetryMs`, reset on `open`; injectable `timers`), re-attaches every registered listener and passes the last non-empty event id as `?lastEventId=`. An `error` while CONNECTING is left to the native retry |
 | `public/announcements.js` | SSE → transcript and `sendText`; `ANNOUNCE_PREFIX`, `ASK_QUESTION_MARK`, `ASK_PLAN_MARK` and the footer line for an `ask` |
 | `public/audio.js`, `public/player.js`, `public/mic-worklet.js` | PCM conversion, `createChunker` (100 ms chunk buffering), gapless 24 kHz playback, the `pcm-capture` worklet |
 | `public/dom.js` | the `el(tag, props, children)` builder; non-node children become text nodes |
@@ -118,7 +119,13 @@ Duplicate triggers therefore never double-announce, and a turn missed during a d
 
 **Restart replay:**
 - SSE ids are `<boot>-<n>`.
-- An EventSource reconnecting after a backend restart presents the old process's id, and the new process replays its whole ring. That ring includes announcements made by the startup reconcile before the page reconnected.
+- An EventSource reconnecting natively after a backend restart presents the old process's id in `Last-Event-ID`, and the new process replays its whole ring. That ring includes announcements made by the startup reconcile before the page reconnected.
+- When the host answers the reconnect with 502/503 (restart backoff, a dead adopted child), the native source is CLOSED for good. `public/events.js` then re-creates it and carries the id in `?lastEventId=`, which `src/sse.js` reads when the header is absent.
+
+**Keep-alive:**
+- `frontend.keepAlive` in `conductor.plugin.json` gives the page its own resident frame in code-conductor, so the page can outlive many backend restarts.
+- The Gemini Live socket goes browser → Gemini, so a backend restart doesn't touch a running call.
+- What does depend on the backend reconnects: the event stream (`public/events.js`), Gemini resumes (`resumeDelayMs` spacing in `public/liveSession.js`), and tool calls (`CLIENT_ERROR` to Gemini while the backend is down). Target, handled turns and the key are persisted (`state.json`, `secrets.json`).
 
 ## Security
 
