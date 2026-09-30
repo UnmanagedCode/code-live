@@ -35,6 +35,30 @@ test('list returns conductors only with one host call', async (t) => {
   assert.deepEqual(ui.json, r, 'the target picker shares the tool implementation');
 });
 
+test("list reports the host's run state: idle only when nothing is in flight", async (t) => {
+  const row = (id, status, displayStatus, activeAgentTasks, awaitingWake) => (
+    { ...CONDUCTOR_A, id, title: id, status, displayStatus, activeAgentTasks, awaitingWake }
+  );
+  const rows = [
+    row('waiting', 'idle', 'idle', 0, true),
+    row('subagents', 'idle', 'running', 2, false),
+    row('both', 'idle', 'running', 1, true),
+    row('idle', 'idle', 'idle', 0, false),
+    row('turn-wake', 'turn', 'turn', 0, true),
+  ];
+  const { app } = await setup(t, { instances: rows });
+  const r = await callTool(app, 'list_conductor_sessions');
+  assert.deepEqual(r.sessions.map((s) => [s.sessionId, s.status]), [
+    ['waiting', 'on a worker'],
+    ['subagents', 'running'],
+    ['both', 'running'],
+    ['idle', 'idle'],
+    ['turn-wake', 'turn'],
+  ]);
+  const ui = await req(`${app.url}/api/conductors`);
+  assert.deepEqual(ui.json, r, 'the target picker shows the same run states');
+});
+
 test('create ensures .conduct, spawns a conductor and makes it active', async (t) => {
   const { host, app } = await setup(t);
   const r = await callTool(app, 'create_conductor_session');

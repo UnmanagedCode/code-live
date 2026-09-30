@@ -13,11 +13,21 @@ export function truncate(text, max) {
   return text.length <= max ? text : text.slice(0, max - 1) + '…';
 }
 
+// The host's raw `status: 'idle'` only means the session's own turn ended. Like
+// the host's own UI, prefer `displayStatus` (`running` while background subagents
+// work) and label an idle session that awaits a worker's wake `on a worker`.
+// Both overlays apply only to `idle`, so `turn`, `spawning`, `exited` and
+// `crashed` pass through.
+function runState(inst) {
+  const shown = inst.displayStatus ?? inst.status;
+  return shown === 'idle' && inst.awaitingWake ? 'on a worker' : shown;
+}
+
 export function summarize(inst) {
   return {
     sessionId: inst.id,
     title: inst.title || truncate(inst.firstPrompt, 60) || 'Untitled conductor',
-    status: inst.status,
+    status: runState(inst),
     lastResponseAt: inst.lastResponseAt ?? null,
   };
 }
