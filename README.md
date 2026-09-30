@@ -62,7 +62,7 @@ Shapes and error codes: [docs/protocol.md](docs/protocol.md).
 ## How auto-announce works
 
 1. The backend keeps a WebSocket to the host's `/ws` and listens for `turn_notification` and `instances` frames.
-2. For the active target, it reads the session's events over REST and takes the newest `turn_end` it hasn't handled. It reads the turn's text from the host's `get_recent_messages` (the last assistant text from the events if that fails, logged) and publishes it as an SSE `announce`. A turn that ended on a question or plan carries it in the text plus `ask`.
+2. For the active target, it reads the session's events over REST and takes the newest `turn_end` it hasn't handled. It reads the turn's text from the host's `get_recent_messages` (the last assistant text from the events if that fails, logged) and publishes it as an SSE `announce`. A turn that ended on a question or plan carries it in the text plus `ask`; a question or plan still pending behind later turns is announced once, on its own.
 3. The page adds it to the transcript and, while live, injects it as `realtimeInput.text` starting `CONDUCTOR UPDATE from "<title>":`. An update that ends on a question or plan has a final `AWAITING ANSWER` or `AWAITING PLAN APPROVAL` line that the system prompt keys on. Gemini speaks it without interrupting.
 
 The same reconcile runs when the host link reconnects and when the backend starts, so a missed turn is announced once. An `instances` frame also triggers it when the target shows an unanswered question or plan, because the host sends no `turn_notification` for a conductor waiting on a worker. Internals: [docs/architecture.md](docs/architecture.md).
@@ -96,8 +96,8 @@ The backend exits with an error if `PROJECTS_ROOT` or `CONDUCTOR_URL` is missing
 ## Known limitations
 
 - The microphone needs a secure context: `http://localhost`, `http://127.0.0.1` or `https`.
-- **code-live calls the host's bare `POST /mcp`** for announcement text, `read_conductor_messages`, and answering or deciding plans. That is not part of the plugin API, so a host change can break it without any manifest-level signal. Announcements and reads then fall back to the events text (logged); answering and deciding fail with `HOST_*` codes. All of it is in `src/hostMcp.js`, so moving to a sanctioned host-tool path touches that module and the manifest only.
-- Plan approval requires `confirmed: true`, which the system prompt allows only after the user's spoken yes. That is enforced by the prompt, not checked against the user's actual speech.
+- **code-live calls the host's bare `POST /mcp`** for announcement text, `read_conductor_messages`, and answering or deciding plans. That is not part of the plugin API, so a host change can break it without any manifest-level signal. Announcements and reads then fall back to the events text (logged, as they also do when a later turn has already spoken); answering and deciding fail with `HOST_*` codes. All of it is in `src/hostMcp.js`, so moving to a sanctioned host-tool path touches that module and the manifest only.
+- Plan approval requires `confirmed: true`, which the system prompt allows only after the user's spoken yes. That guards against a misheard utterance; it is not a security boundary. Conductor-written text reaches Gemini's conversation and could itself prompt an approval, but that grants nothing a conductor cannot already do through the open host API.
 - The host API has no auth, and the same-origin plugin iframe could drive all of code-conductor. The mitigations are DOM-text-only rendering of model output and a strict CSP.
 - Every open Code Live tab injects each announcement into its own Gemini session, so two live tabs speak it twice.
 - Only **live** conductor sessions (those in `GET /api/instances`) are listed or targetable.

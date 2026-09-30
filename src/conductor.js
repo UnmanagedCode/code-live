@@ -1,7 +1,7 @@
 // The conductor service behind both the Gemini tools and the UI's target
 // picker. Every path resolves sessions against conductor rows only, so a
 // worker session can never be listed, read, prompted or targeted.
-import { assistantText, isConductor, summarize, toolAsk, truncate, truncateBody, MAX_TEXT } from './hostEvents.js';
+import { assistantText, isConductor, latestAskEvent, summarize, toolAsk, truncate, truncateBody, MAX_TEXT } from './hostEvents.js';
 import { pairMessages } from './hostMcp.js';
 import { describeAnswers, resolveAnswers, remapQuestion } from './answerMapping.js';
 
@@ -20,9 +20,8 @@ function refusal(r) {
 }
 
 function latestQuestions(data) {
-  const events = Array.isArray(data?.events) ? data.events : [];
-  const ev = events.findLast((e) => e.kind === 'user_question' && Array.isArray(e.questions) && e.questions.length > 0);
-  return ev ? ev.questions : null;
+  const ev = latestAskEvent(Array.isArray(data?.events) ? data.events : [], 'question');
+  return ev && ev.questions.length > 0 ? ev.questions : null;
 }
 
 function describe(rows) {
@@ -97,12 +96,16 @@ export function createConductorService({ api, link, state, announcer, publish, h
   async function readMessages(row, count) {
     if (row.sessionId) {
       try {
-        return pairMessages(await hostMcp.recentMessages(row.sessionId, { count })).map((m) => ({
-          text: truncateBody(m.text, MAX_TEXT),
-          ...(m.hasPlan ? { hasPlan: true } : {}),
-          ...(m.planPath ? { planPath: m.planPath } : {}),
-          ...(m.questionCount !== undefined ? { questionCount: m.questionCount } : {}),
-        }));
+        return pairMessages(await hostMcp.recentMessages(row.sessionId, { count })).map((m) => {
+          const body = truncateBody(m.text, MAX_TEXT);
+          return {
+            text: body.text,
+            ...(m.hasPlan ? { hasPlan: true } : {}),
+            ...(m.planPath ? { planPath: m.planPath } : {}),
+            ...(m.questionCount !== undefined ? { questionCount: m.questionCount } : {}),
+            ...(body.cut ? { questionsTruncated: true } : {}),
+          };
+        });
       } catch (e) {
         console.error('code-live: get_recent_messages failed, reading /events:', e.message);
       }
@@ -186,6 +189,10 @@ export function createConductorService({ api, link, state, announcer, publish, h
         await hostMcp.answerQuestion(sessionId, answers);
       } catch (e) {
         const i = e.detail?.questionIndex;
+        // The host counts questions from 0 and Gemini from 1.
+        if (e.code === 'NOT_MULTISELECT' && Number.isInteger(i)) {
+          throw fail('NOT_MULTISELECT', `Question ${i + 1} takes a single choice, but several were given.`, { question: i + 1 });
+        }
         if (e.code !== 'INVALID_OPTION' || !Array.isArray(e.detail?.offered) || !Number.isInteger(i)) throw e;
         // The host's own label list is authoritative: map the spoken words to
         // it once, then give up and hand the options back.

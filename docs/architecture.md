@@ -25,7 +25,7 @@ browser (Code Live page)                       code-live backend (node:http)    
 | `src/config.js` | `loadConfig(env)`: env → config; throws on a missing `PROJECTS_ROOT` / `CONDUCTOR_URL`; derives `dataDir`, `geminiWsUrl` and `hostWsUrl` |
 | `src/atomicFile.js` | `writeFileAtomic` (0600 temp file + rename + chmod, directory 0700) and `readJson` (`null` if absent, `STORE_CORRUPT` if unparseable) |
 | `src/keyStore.js` | `secrets.json`: `get` (the only key accessor, used only by `gemini.js`), `status`, `set` (validation), `clear` |
-| `src/stateStore.js` | `state.json`: `{activeTargetId, lastHandledTurnSeq, lastHandledMsgId}`; writes are serialized, so the file ends at the last `update` |
+| `src/stateStore.js` | `state.json`: `{activeTargetId, lastHandledTurnSeq, lastHandledMsgId, lastHandledAskId}`; writes are serialized, so the file ends at the last `update` |
 | `src/models.js` | `MODELS`, the pinned catalog with per-model `thinkingLevel` / `toolBehavior` and the optional picker `hint`; `getModel` |
 | `src/tools.js` | `DECLARATIONS` (the single source for the Gemini setup and the dispatcher), `toolDeclarations(model)`, and `callTool` (validation + dispatch; never throws) |
 | `src/liveSetup.js` | `SYSTEM_PROMPT`, `buildSetup(modelId, resumeHandle)` |
@@ -34,7 +34,7 @@ browser (Code Live page)                       code-live backend (node:http)    
 | `src/ccLink.js` | host `/ws` client: reconnect/backoff, reqId→ack pairing, and `turn_notification` / `instances` / `open` / `close` events |
 | `src/hostMcp.js` | the only module that calls the host's bare `POST /mcp` (unsanctioned, outside the plugin API): `recentMessages`, `answerQuestion`, `approvePlan`, `rejectPlan`, and `pairMessages`. Errors carry `code` and `detail` (see [protocol](protocol.md#mcp-tools)) |
 | `src/answerMapping.js` | pure: `resolveAnswers` / `remapQuestion` map spoken choices to the host's exact labels; `describeAnswers` |
-| `src/hostEvents.js` | helpers shared by the service and announcer: `isConductor`, `summarize`, `assistantText`, `truncate`, `truncateBody`, `toolAsk`, `lastAssistantMsgId`, `MAX_TEXT` |
+| `src/hostEvents.js` | helpers shared by the service and announcer: `isConductor`, `summarize`, `assistantText`, `truncate`, `truncateBody`, `toolAsk`, `newestTurnEnd`, `lastAssistantMsgId`, `latestAskEvent`, `askTurnEnd`, `askId`, `renderQuestions`, `renderPlan`, `MAX_TEXT` |
 | `src/conductor.js` | the conductor service behind both the tools and the UI routes: `list`, `create`, `send`, `read`, `answer`, `approve`, `reject`, `resolve`, `setTarget`, `clearTarget`, `getTarget` |
 | `src/announcer.js` | turn-end reconciliation → SSE `announce`; target baselines |
 | `src/sse.js` | SSE hub: boot-scoped ids, a 20-event replay ring, keepalive |
@@ -61,10 +61,10 @@ Everything lives under `$PROJECTS_ROOT/.code-live/` (directory mode 0700). The p
 | file | contents | mode |
 |---|---|---|
 | `secrets.json` | `{"geminiApiKey":"…"}` | 0600 |
-| `state.json` | `{"activeTargetId":string\|null, "lastHandledTurnSeq":number, "lastHandledMsgId":string\|null}` | 0600 |
+| `state.json` | `{"activeTargetId":string\|null, "lastHandledTurnSeq":number, "lastHandledMsgId":string\|null, "lastHandledAskId":string\|null}` | 0600 |
 
 - Both files are written atomically: a temp file `.<name>.<pid>.<n>.tmp`, then a rename.
-- A `state.json` without `lastHandledMsgId` loads it as `null`; a non-string value is `STORE_CORRUPT`.
+- A `state.json` without `lastHandledMsgId` or `lastHandledAskId` loads it as `null`; a non-string value is `STORE_CORRUPT`.
 - A malformed file throws `STORE_CORRUPT`; it is never treated as empty.
 - The backend fails to start if `state.json` is corrupt.
 
@@ -81,22 +81,25 @@ Everything lives under `$PROJECTS_ROOT/.code-live/` (directory mode 0700). The p
 
 ## Announcer
 
-Reconciling is the only path that announces, and it is idempotent by the turn's `_seq` together with the msgId of its last assistant message:
+Reconciling is the only path that announces. A turn is idempotent by its `_seq` together with the msgId of its last assistant message, and a pending question or plan by its `tool_use` id (`lastHandledAskId`). Events with `parentToolUseId` (sub-agents) never count as turns or messages, matching the host:
 
 1. It confirms the persisted target is a live conductor row in `GET /api/instances`. A missing row or a non-`.conduct` row clears the target (SSE `target: null`), so a worker is never announced. If the host is unreachable, it logs and stops.
 2. It reads the target's trailing 500 events. A `lastSeq` below `lastHandledTurnSeq` means the host reset the ring (rewind, prune, respawn), so the handled seq counts as `-1` for this pass.
 3. It takes the newest `turn_end` with `_seq` above the handled seq; with none, it stops.
 4. `msgId` is the last assistant message inside that turn. If it equals `lastHandledMsgId`, the turn is a replay of one already announced: the new seq is persisted and nothing is published. A turn with no `msgId` never matches.
-5. It reads the content (below).
-6. It persists `{lastHandledTurnSeq, lastHandledMsgId}` and publishes `announce`.
+5. The row is the authority on whether an ask is pending (`toolAsk`). If it is, the newest matching `user_question` / `plan_request` event is the ask, and its own turn must have ended (a `turn_end` after it). An ask whose id is not `lastHandledAskId` is unannounced.
+   - When the ask's turn is the newest turn, the two are one announcement.
+   - When later turns exist (or the newest turn was a silent replay), the ask is announced first on its own, with `turnSeq` of the ask's turn and text from the events, then the later turn follows as usual. An ask-only run announces the ask and leaves the turn cursor alone.
+6. It reads the content (below).
+7. It persists `{lastHandledTurnSeq, lastHandledMsgId}` (and `lastHandledAskId` for an ask) and publishes `announce`.
 
 A 404 clears the target (SSE `target: null`); other errors are logged.
 
 **Content** comes from `hostMcp.recentMessages(row.sessionId)`:
-- `text` is the returned bodies joined with newlines, so a turn's plan or questions are included. `ask` is `{kind:"question", count}` or `{kind:"plan", planPath}` only when the row also shows an unanswered tool ask of that kind (`toolAsk`), else `null`.
-- The text is used only if the newest returned message has the turn's `msgId`. If a later turn has already spoken, the turn's own text is read from the events instead, with `ask: null`.
-- If the read fails, or the row has no `sessionId` yet, the last assistant text from the events is used with `ask: null`, and the failure is logged.
-- Over 4000 characters, `truncateBody` keeps a trailing `--- questions ---` section whole and cuts the prose before it; anything else is cut from the end.
+- `text` is the returned bodies joined with newlines, so a turn's plan or questions are included. `ask` is `{kind:"question", count}` or `{kind:"plan", planPath}` when an unannounced ask ended this turn, else `null`.
+- The text is used only if the newest returned message has the turn's `msgId`. Otherwise (a later turn has already spoken, the read failed, or the row has no `sessionId` yet) the turn's last assistant text from the events is used, and the reason is logged.
+- Either way, if the ask's section is missing from the text it is rendered from the ask's own event in the host's fence format, so the ask is never dropped.
+- Over 4000 characters, `truncateBody` keeps a trailing `--- questions ---` section whole and cuts the prose before it. A section that alone exceeds the limit is shortened line by line (descriptions before labels) and `ask.truncated` is set; anything else is cut from the end. Answering maps choices against the untruncated `user_question` event.
 
 **Triggers:**
 - a `turn_notification` whose `id` is the active target;
@@ -104,13 +107,13 @@ A 404 clears the target (SSE `target: null`); other errors are logged.
 - backend startup;
 - an `instances` frame (`reconcileAsk`), for a conductor the host stopped notifying about (it sends no `turn_notification` for a conductor that holds an armed wake on a worker).
 
-`reconcileAsk` is coalesced to one queued run and does nothing unless the target row shows an unanswered tool ask whose `awaitingUser:lastResponseAt` differs from the last turn announced or replayed. It announces only if the content read carries an `ask`; otherwise it changes no state, so a turn the host deliberately suppressed stays silent.
+`reconcileAsk` is coalesced to one queued run and does nothing unless the target row shows an unanswered tool ask whose `awaitingUser:lastResponseAt` differs from the ask state the last completed reconcile settled. A reconcile settles the state unless the ask's own turn is still running, so an unchanged ask costs one events read (and one MCP read when it announces); each further `instances` frame costs only the instance-list read. It announces only a pending ask, so a turn the host deliberately suppressed stays silent.
 
 Duplicate triggers therefore never double-announce, and a turn missed during a disconnect or a restart is announced once.
 
 **Serialization:**
 - Reconciles, `baseline(id, seq?)` (a target switch) and `clear()` share one promise chain, so a reconcile for the old target cannot overwrite a new baseline.
-- `baseline` marks every turn the session has already finished as handled (`-1` for a freshly created conductor), so switching targets never announces old turns.
+- `baseline` marks every turn the session has already finished, and a question or plan it ended on, as handled (`-1` for a freshly created conductor), so switching targets never announces old turns.
 - `send` awaits the switch (baseline included) **before** it sends the prompt. Otherwise a fast turn could end before the baseline and be marked handled unannounced. The test `a turn that ends right after a switching send is still announced` pins this ordering.
 
 **Restart replay:**
@@ -135,7 +138,7 @@ Run with `npm test`, which is `node tests/run.mjs`: the `node:test` runner drive
 - **Fakes:**
   - `tests/fakes/fakeGemini.mjs` fakes the auth_tokens mint (with an injectable failure) and the Live socket. It checks single-use tokens, sends binary frames, and records client messages. `session(i)` / `next(pred)` / `closed` let tests await specific traffic, and `setConnectMode('reject')` makes resume attempts fail.
   - `tests/fakes/fakeHost.mjs` fakes the instance, ensure and events routes, plus `/ws` prompt/ack. Ack modes are `ok` / `refuse` / `silent`. It also has `broadcast`, `dropConnections`, `onPrompt` hooks and `finishTurn(id, text)`.
-  - Its `POST /mcp` checks the JSON-RPC request shape, records `mcpCalls`, answers `get_recent_messages` from the instance's events (bonding like the host) and takes handlers for the other tools through `setMcp(name, fn)` with the `mcpOk` / `mcpSoft` / `mcpThrown` envelopes. `finishAsk(id, {kind, …})` ends a turn on a question or plan and sets the row's `awaitingUser*` fields; `resetRing(id)` renumbers the events as a respawn does; `setRow` patches a row.
+  - Its `POST /mcp` checks the JSON-RPC request shape, records `mcpCalls`, answers `get_recent_messages` from the instance's events (bonding like the host) and takes handlers for the other tools through `setMcp(name, fn)` with the `mcpOk` / `mcpSoft` / `mcpThrown` envelopes. `finishAsk(id, {kind, …})` ends a turn on a question or plan and sets the row's `awaitingUser*` fields (`frames:false` sends no `/ws` frame); its message reconstruction skips `parentToolUseId` events as the host does; `resetRing(id)` renumbers the events as a respawn does; `setRow` patches a row.
 - **Harness:** `tests/helpers.mjs`' `startApp()` builds a real server through `buildDeps` with a fresh temp `PROJECTS_ROOT` and short link timings. It also provides an SSE client and `SENTINEL_KEY`; tests use only that sentinel key.
 - **Frontend:** `tests/dom.mjs` installs happy-dom globals and imports the real `public/` modules.
 - **Waits:** tests wait on observable outcomes (an SSE event, a received frame, a published marker), never on fixed sleeps.

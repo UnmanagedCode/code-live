@@ -6,21 +6,20 @@
 // duplicate or missed notification never double-announces or drops a turn, and
 // a host that replays its history under fresh _seq numbers stays silent.
 //
+// A pending question or plan is announced once, keyed by its tool_use id, even
+// when later turns have already ended: the instance row says whether an ask is
+// pending, and its content comes from the ask's own turn.
+//
 // The announced text comes from the host's get_recent_messages (through
-// hostMcp), which carries the turn's plan and questions; when that read fails
-// the last assistant text from /events is used instead and the failure logged.
-import { assistantText, hasSeq, isConductor, lastAssistantMsgId, summarize, toolAsk, truncateBody, MAX_TEXT } from './hostEvents.js';
+// hostMcp) when it ends on the announced turn; otherwise the turn's last
+// assistant text from /events is used and the reason logged.
+import {
+  assistantText, askId, askTurnEnd, hasSeq, isConductor, lastAssistantMsgId, latestAskEvent, newestTurnEnd,
+  renderPlan, renderQuestions, summarize, toolAsk, truncateBody, MAX_TEXT,
+} from './hostEvents.js';
 import { pairMessages } from './hostMcp.js';
 
 const NO_TEXT = '(turn finished with no text reply)';
-
-function newestTurnEnd(events, afterSeq) {
-  let found = null;
-  for (const ev of events) {
-    if (ev.kind === 'turn_end' && hasSeq(ev) && ev._seq > afterSeq && (!found || ev._seq > found._seq)) found = ev;
-  }
-  return found;
-}
 
 function eventsText(events, turnEnd) {
   let text = '';
@@ -41,7 +40,9 @@ function askKey(row) {
 export function createAnnouncer({ api, link, state, publish, hostMcp }) {
   let chain = Promise.resolve();
   let askQueued = false;
-  let probedAsk = null;
+  // The ask state the last completed reconcile settled, so an unchanged state
+  // is not probed again; `done` is false while the ask's turn is still running.
+  let probed = { key: null, done: false };
   // Target switches and reconciles share one queue, so a reconcile for the old
   // target can never write its seq over a fresh baseline.
   function serialize(fn) {
@@ -55,35 +56,63 @@ export function createAnnouncer({ api, link, state, publish, hostMcp }) {
     publish('target', null);
   }
 
-  // The announced text and the pending ask it carries (null when none).
-  // get_recent_messages returns the session's newest messages, so when a later
-  // turn has already spoken (its last msgId is not this turn's) the turn's own
-  // text is read from /events instead.
-  async function readContent(row, events, turnEnd, msgId) {
-    if (row.sessionId) {
-      try {
-        const messages = pairMessages(await hostMcp.recentMessages(row.sessionId));
-        if (msgId !== null && messages.at(-1)?.msgId !== msgId) return { text: eventsText(events, turnEnd), ask: null };
-        const tool = toolAsk(row);
-        const question = messages.findLast((m) => m.questionCount);
-        const plan = messages.findLast((m) => m.hasPlan);
-        let ask = null;
-        if (tool === 'question' && question) ask = { kind: 'question', count: question.questionCount };
-        else if (tool === 'plan' && plan) ask = { kind: 'plan', planPath: plan.planPath ?? null };
-        return { text: messages.map((m) => m.text).filter(Boolean).join('\n'), ask };
-      } catch (e) {
-        console.error('code-live: get_recent_messages failed, announcing the /events text:', e.message);
-      }
-    } else {
+  // get_recent_messages when it ends on this turn, else null (logged). It
+  // returns the session's newest messages, so a later turn that has already
+  // spoken makes it the wrong source for this one.
+  async function recentFor(row, msgId) {
+    if (!row.sessionId) {
       console.error('code-live: the conductor has no host session id yet, announcing the /events text');
+      return null;
     }
-    return { text: eventsText(events, turnEnd), ask: null };
+    let messages;
+    try {
+      messages = pairMessages(await hostMcp.recentMessages(row.sessionId));
+    } catch (e) {
+      console.error('code-live: get_recent_messages failed, announcing the /events text:', e.message);
+      return null;
+    }
+    if (msgId !== null && messages.at(-1)?.msgId !== msgId) {
+      console.error('code-live: get_recent_messages does not end on the announced turn (a later turn has spoken), announcing the /events text');
+      return null;
+    }
+    return messages;
   }
 
-  // `askOnly` announces a turn only when it ends on a pending question or plan
-  // and otherwise leaves all state untouched.
+  // The text and ask of one announcement. `pending` is the unannounced ask
+  // that ended this turn; its content is added from its own event unless the
+  // host's messages already carry it.
+  async function compose({ row, events, turnEnd, msgId, pending, useMcp }) {
+    const messages = useMcp ? await recentFor(row, msgId) : null;
+    let text = messages ? messages.map((m) => m.text).filter(Boolean).join('\n') : eventsText(events, turnEnd);
+    if (!pending) return { text, ask: null };
+    const add = (section) => { text = [text, section].filter(Boolean).join('\n'); };
+    if (pending.kind === 'question') {
+      const carried = messages?.findLast((m) => m.questionCount);
+      if (!carried) add(renderQuestions(pending.ev.questions));
+      return { text, ask: { kind: 'question', count: carried ? carried.questionCount : pending.ev.questions.length } };
+    }
+    const carried = messages?.findLast((m) => m.hasPlan);
+    if (!carried) add(renderPlan(pending.ev));
+    return { text, ask: { kind: 'plan', planPath: (carried ? carried.planPath : pending.ev.planPath) ?? null } };
+  }
+
+  function emit(id, row, turnEnd, { text, ask }) {
+    const fitted = text ? truncateBody(text, MAX_TEXT) : null;
+    publish('announce', {
+      sessionId: id,
+      title: summarize(row).title,
+      text: fitted ? fitted.text : NO_TEXT,
+      turnSeq: turnEnd._seq,
+      isError: !!turnEnd.isError,
+      ask: ask && fitted?.cut ? { ...ask, truncated: true } : ask,
+    });
+  }
+
+  // `askOnly` announces only a pending ask (with its turn, when that is the
+  // newest) and otherwise leaves state untouched.
   async function doReconcile({ askOnly = false, row: known } = {}) {
-    const { activeTargetId: id, lastHandledTurnSeq, lastHandledMsgId } = state.get();
+    const st = state.get();
+    const id = st.activeTargetId;
     if (!id) return;
     let row = known;
     if (!row) {
@@ -108,36 +137,50 @@ export function createAnnouncer({ api, link, state, publish, hostMcp }) {
     const events = Array.isArray(data?.events) ? data.events : [];
     // A ring that ends before the last handled turn was reset by the host
     // (rewind, prune, respawn) and is numbered afresh.
-    const handled = typeof data?.lastSeq === 'number' && data.lastSeq < lastHandledTurnSeq ? -1 : lastHandledTurnSeq;
+    const handled = typeof data?.lastSeq === 'number' && data.lastSeq < st.lastHandledTurnSeq ? -1 : st.lastHandledTurnSeq;
     const turnEnd = newestTurnEnd(events, handled);
-    if (!turnEnd) return;
-    const msgId = lastAssistantMsgId(events, turnEnd._seq);
-    if (msgId !== null && msgId === lastHandledMsgId) {
-      // The turn already announced, replayed under a new _seq.
-      await state.update({ lastHandledTurnSeq: turnEnd._seq });
-      probedAsk = askKey(row);
-      return;
+
+    // The row says whether an ask is pending; the ask's own events say what it is.
+    const kind = toolAsk(row);
+    const askEv = kind ? latestAskEvent(events, kind) : null;
+    const askEnd = askEv ? askTurnEnd(events, askEv) : null;
+    const pending = askEv && askEnd && askId(askEv) !== st.lastHandledAskId ? { kind, ev: askEv, end: askEnd, id: askId(askEv) } : null;
+
+    let msgId = null;
+    let announceTurn = false;
+    if (turnEnd) {
+      msgId = lastAssistantMsgId(events, turnEnd._seq);
+      if (msgId !== null && msgId === st.lastHandledMsgId) {
+        // The turn already announced, replayed under a new _seq.
+        await state.update({ lastHandledTurnSeq: turnEnd._seq });
+      } else {
+        announceTurn = !askOnly || (!!pending && pending.end._seq === turnEnd._seq);
+      }
     }
-    const { text, ask } = await readContent(row, events, turnEnd, msgId);
-    if (askOnly && !ask) return;
-    await state.update({ lastHandledTurnSeq: turnEnd._seq, lastHandledMsgId: msgId });
-    probedAsk = askKey(row);
-    publish('announce', {
-      sessionId: id,
-      title: summarize(row).title,
-      text: text ? truncateBody(text, MAX_TEXT) : NO_TEXT,
-      turnSeq: turnEnd._seq,
-      isError: !!turnEnd.isError,
-      ask,
-    });
+    const combined = announceTurn && !!pending && pending.end._seq === turnEnd._seq;
+
+    // An ask that an older turn ended (or a replayed one) is announced by itself,
+    // before the later turn.
+    if (pending && !combined) {
+      const content = await compose({ row, events, turnEnd: pending.end, msgId: null, pending, useMcp: false });
+      await state.update({ lastHandledAskId: pending.id });
+      emit(id, row, pending.end, content);
+    }
+    if (announceTurn) {
+      const content = await compose({ row, events, turnEnd, msgId, pending: combined ? pending : null, useMcp: true });
+      await state.update({ lastHandledTurnSeq: turnEnd._seq, lastHandledMsgId: msgId, ...(combined ? { lastHandledAskId: pending.id } : {}) });
+      emit(id, row, turnEnd, content);
+    }
+    // Settled unless the ask's own turn is still running.
+    probed = { key: askKey(row), done: !kind || !askEv || !!askEnd };
   }
 
   const announcer = {
     reconcile: () => serialize(doReconcile),
 
     // Reconciles for a pending question or plan the host may not have sent a
-    // turn_notification for. Coalesced, and skipped unless the row's ask
-    // changed since the last turn it announced or replayed.
+    // turn_notification for. Coalesced, and skipped once the row's ask state
+    // has been settled by a completed reconcile.
     reconcileAsk() {
       if (askQueued) return chain;
       askQueued = true;
@@ -153,7 +196,7 @@ export function createAnnouncer({ api, link, state, publish, hostMcp }) {
           return;
         }
         const key = askKey(row);
-        if (key === null || key === probedAsk) return;
+        if (key === null || (probed.done && key === probed.key)) return;
         await doReconcile({ askOnly: true, row });
       });
     },
@@ -164,15 +207,19 @@ export function createAnnouncer({ api, link, state, publish, hostMcp }) {
     baseline: (id, seq) => serialize(async () => {
       let handled = seq;
       let msgId = null;
+      let ask = null;
       if (handled === undefined) {
         const data = await api.getEvents(id);
         const events = Array.isArray(data?.events) ? data.events : [];
         const newest = newestTurnEnd(events, -Infinity);
         handled = newest ? newest._seq : -1;
         if (newest) msgId = lastAssistantMsgId(events, newest._seq);
+        // A question or plan the session already ended on is not news either.
+        const asks = ['question', 'plan'].map((k) => latestAskEvent(events, k)).filter((ev) => ev && askTurnEnd(events, ev));
+        if (asks.length) ask = askId(asks.reduce((a, b) => (b._seq > a._seq ? b : a)));
       }
-      probedAsk = null;
-      await state.update({ activeTargetId: id, lastHandledTurnSeq: handled, lastHandledMsgId: msgId });
+      probed = { key: null, done: false };
+      await state.update({ activeTargetId: id, lastHandledTurnSeq: handled, lastHandledMsgId: msgId, lastHandledAskId: ask });
     }),
 
     clear: () => serialize(() => state.update({ activeTargetId: null })),

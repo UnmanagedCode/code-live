@@ -182,11 +182,13 @@ test('a persisted worker id is never announced and is cleared', async (t) => {
 
 test('the announced text is the reply before the turn_end, not the next turn\'s', async (t) => {
   const { host, app, sse } = await setup(t);
+  const logged = t.mock.method(console, 'error', () => {});
   host.addEvent('cond-a', { ...reply('reply to turn one'), msgId: 'msg-one' });
   const end = host.addEvent('cond-a', { kind: 'turn_end', isError: false });
   host.addEvent('cond-a', { ...reply('turn two already talking'), msgId: 'msg-two' });
   await app.deps.announcer.reconcile();
   const ev = await sse.next('announce');
+  assert.ok(logged.mock.calls.some((c) => /later turn has spoken/.test(String(c.arguments[0]))), 'the stale-turn fallback is logged');
   assert.equal(ev.data.text, 'reply to turn one');
   assert.equal(ev.data.turnSeq, end._seq);
 });
@@ -319,15 +321,17 @@ test('an ask whose turn has not ended is not announced early, then is once the t
   assert.deepEqual(ev.data.ask, { kind: 'question', count: 2 });
 });
 
-test('the announced text falls back to /events, with a logged error, when the MCP read fails', async (t) => {
+test('when the MCP read fails the text falls back to /events, logged, and the pending ask is rendered from its own event', async (t) => {
   const { host, sse } = await setup(t);
   const logged = t.mock.method(console, 'error', () => {});
   host.setMcp('get_recent_messages', () => ({ content: [{ type: 'text', text: 'boom' }], isError: true }));
   host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, prose: 'Fallback prose.' });
   const ev = await sse.next('announce');
-  assert.equal(ev.data.text, 'Fallback prose.', 'the events prose, without the questions');
-  assert.equal(ev.data.ask, null);
+  assert.match(ev.data.text, /^Fallback prose\.\n--- questions ---\n1\. Which database\?/, 'the events prose plus the questions rendered from the user_question event');
+  assert.deepEqual(ev.data.ask, { kind: 'question', count: 2 });
   assert.ok(logged.mock.calls.some((c) => /get_recent_messages failed/.test(String(c.arguments[0]))), 'the degradation is logged');
+  host.finishTurn('cond-a', 'plain after failure');
+  assert.equal((await sse.next('announce', (d) => d.text === 'plain after failure')).data.ask, null);
 });
 
 test('a conductor with no host session id yet falls back to /events', async (t) => {
@@ -402,4 +406,189 @@ test('switching target records the msgId of its last finished turn', async (t) =
   await app.deps.service.setTarget('cond-a');
   assert.equal(app.deps.state.get().lastHandledMsgId, null);
   assert.equal(mcpReads(host).length, 0);
+});
+
+// ---- a pending ask that is not the newest turn ----
+
+const eventReads = (host) => host.requests.filter((q) => q.method === 'GET' && q.url.startsWith('/api/instances/cond-a/events')).length;
+const listReads = (host) => host.requests.filter((q) => q.method === 'GET' && q.url === '/api/instances').length;
+// A conductor that ended on an ask the host did not notify about, then ran a
+// later turn (a wake from a worker): the row still shows the unanswered ask.
+function askThenLaterTurn(host, ask, later = 'worker finished, carrying on') {
+  const askEnd = host.finishAsk('cond-a', { ...ask, notify: false, frames: false });
+  const laterEnd = host.finishTurn('cond-a', later, { notify: false });
+  return { askEnd, laterEnd };
+}
+
+test('a pending question is announced by an instances frame even though a later turn exists', async (t) => {
+  const { host, app, sse } = await setup(t);
+  const { askEnd } = askThenLaterTurn(host, { kind: 'question', questions: QUESTIONS, prose: 'Two quick things.' });
+  host.broadcast({ t: 'instances', instances: host.state.instances });
+  const ev = await sse.next('announce');
+  assert.equal(ev.data.turnSeq, askEnd._seq, 'the ask\'s own turn, not the later one');
+  assert.deepEqual(ev.data.ask, { kind: 'question', count: 2 });
+  assert.match(ev.data.text, /^Two quick things\.\n--- questions ---\n1\. Which database\?.*\n {3}- Postgres \(Recommended\): robust\n {3}- SQLite: tiny: embedded\n2\. Which checks\?.*\n {3}- Lint: style\n {3}- Test: unit$/s);
+  await settle(app, sse);
+  assert.equal(announces(sse).length, 1, 'the suppressed later turn stays silent on an ask-only trigger');
+  assert.equal(app.deps.state.get().lastHandledTurnSeq, -1, 'the turn cursor is untouched');
+  assert.equal(app.deps.state.get().lastHandledAskId, 'tu1');
+});
+
+test('the plain path announces the pending ask first, then the later turn, each once', async (t) => {
+  const { host, app, sse } = await setup(t);
+  const { askEnd, laterEnd } = askThenLaterTurn(host, { kind: 'question', questions: QUESTIONS });
+  await app.deps.announcer.reconcile();
+  await settle(app, sse);
+  const got = announces(sse);
+  assert.deepEqual(got.map((a) => [a.turnSeq, a.ask?.kind ?? null]), [[askEnd._seq, 'question'], [laterEnd._seq, null]]);
+  assert.equal(got[1].text, 'worker finished, carrying on');
+  assert.equal(app.deps.state.get().lastHandledTurnSeq, laterEnd._seq);
+  // Duplicate triggers of every kind add nothing.
+  host.broadcast({ t: 'instances', instances: host.state.instances });
+  host.broadcast({ t: 'turn_notification', id: 'cond-a' });
+  await app.deps.announcer.reconcileAsk();
+  await drain(app, sse);
+  assert.equal(announces(sse).length, 2);
+});
+
+test('a pending ask is not announced again after the host renumbers its ring', async (t) => {
+  const { host, app, sse } = await setup(t);
+  for (let i = 0; i < 6; i++) host.addEvent('cond-a', { kind: 'tool_use', name: 'Bash' });
+  askThenLaterTurn(host, { kind: 'question', questions: QUESTIONS });
+  await app.deps.announcer.reconcile();
+  await settle(app, sse);
+  assert.equal(announces(sse).length, 2);
+  host.resetRing('cond-a', { drop: (ev) => ev.kind === 'tool_use' });
+  await app.deps.announcer.reconcile();
+  host.broadcast({ t: 'instances', instances: host.state.instances });
+  await app.deps.announcer.reconcileAsk();
+  await settle(app, sse);
+  assert.equal(announces(sse).length, 2, 'the tool_use id keys the ask, so a new _seq does not re-announce it');
+});
+
+test('a pending plan behind a later turn is announced from its plan_request event', async (t) => {
+  const { host, app, sse } = await setup(t);
+  const { askEnd } = askThenLaterTurn(host, { kind: 'plan', plan: 'Step 1: do it', planPath: '/plans/x.md', prose: 'Plan below.' });
+  host.broadcast({ t: 'instances', instances: host.state.instances });
+  const ev = await sse.next('announce');
+  assert.equal(ev.data.turnSeq, askEnd._seq);
+  assert.deepEqual(ev.data.ask, { kind: 'plan', planPath: '/plans/x.md' });
+  assert.equal(ev.data.text, 'Plan below.\n--- plan · saved to /plans/x.md ---\nStep 1: do it');
+  await settle(app, sse);
+  assert.equal(announces(sse).length, 1);
+});
+
+test('a second ask after the first was announced is announced too', async (t) => {
+  const { host, app, sse } = await setup(t);
+  host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, prose: 'first', notify: false });
+  await sse.next('announce', (d) => d.text.startsWith('first'));
+  host.finishAsk('cond-a', { kind: 'question', questions: [QUESTIONS[0]], prose: 'second', notify: false });
+  const second = await sse.next('announce', (d) => d.text.startsWith('second'));
+  assert.deepEqual(second.data.ask, { kind: 'question', count: 1 });
+  await settle(app, sse);
+  assert.equal(announces(sse).length, 2);
+});
+
+test('an ask the session already ended on when it became the target is not announced', async (t) => {
+  const { host, app, sse } = await setup(t);
+  host.finishAsk('cond-b', { kind: 'question', questions: QUESTIONS, notify: false, frames: false });
+  await app.deps.service.setTarget('cond-b');
+  assert.equal(app.deps.state.get().lastHandledAskId, 'tu1');
+  host.broadcast({ t: 'instances', instances: host.state.instances });
+  await app.deps.announcer.reconcileAsk();
+  await app.deps.announcer.reconcile();
+  await settle(app, sse);
+  assert.deepEqual(announces(sse), []);
+});
+
+// ---- sub-agent messages ----
+
+test('a sub-agent message between the question and turn_end does not change the turn\'s msgId or text', async (t) => {
+  const { host, app, sse } = await setup(t);
+  const logged = t.mock.method(console, 'error', () => {});
+  host.addEvent('cond-a', { kind: 'assistant_message', msgId: 'main-1', message: { content: [{ type: 'text', text: 'Two quick things.' }] } });
+  host.addEvent('cond-a', { kind: 'user_question', toolUseId: 'toolu_q', questions: QUESTIONS });
+  host.addEvent('cond-a', { kind: 'assistant_message', msgId: 'sub-1', parentToolUseId: 'toolu_task', message: { content: [{ type: 'text', text: 'sub-agent chatter' }] } });
+  const end = host.addEvent('cond-a', { kind: 'turn_end', isError: false });
+  host.setRow('cond-a', { awaitingUser: 'question', awaitingUserSource: 'tool', lastResponseAt: 9 });
+  host.broadcast({ t: 'turn_notification', id: 'cond-a' });
+  const ev = await sse.next('announce');
+  assert.equal(ev.data.turnSeq, end._seq);
+  assert.doesNotMatch(ev.data.text, /sub-agent chatter/);
+  assert.match(ev.data.text, /^Two quick things\.\n--- questions ---/, 'the host\'s own rendering, so the stale-turn guard accepted it');
+  assert.deepEqual(ev.data.ask, { kind: 'question', count: 2 });
+  assert.equal(app.deps.state.get().lastHandledMsgId, 'main-1');
+  assert.ok(!logged.mock.calls.some((c) => /later turn has spoken/.test(String(c.arguments[0]))), 'no stale-turn fallback');
+});
+
+test('a sub-agent turn_end is not a turn of the conductor', async (t) => {
+  const { host, app, sse } = await setup(t);
+  host.finishTurn('cond-a', 'real turn', { notify: false });
+  await app.deps.announcer.reconcile();
+  const handled = app.deps.state.get();
+  host.addEvent('cond-a', { kind: 'turn_end', parentToolUseId: 'toolu_task', isError: false });
+  await app.deps.announcer.reconcile();
+  await settle(app, sse);
+  assert.equal(announces(sse).length, 1);
+  assert.deepEqual(app.deps.state.get(), handled);
+});
+
+// ---- latching ----
+
+test('an unchanged ask state costs one events read and one MCP read, however many instances frames follow', async (t) => {
+  const { host, app, sse } = await setup(t);
+  host.requests.length = 0;
+  host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, notify: false });
+  for (let i = 0; i < 6; i++) host.broadcast({ t: 'instances', instances: host.state.instances });
+  await sse.next('announce');
+  await app.deps.announcer.reconcileAsk();
+  assert.equal(eventReads(host), 1);
+  assert.equal(mcpReads(host).length, 1);
+  const lists = listReads(host);
+  for (let i = 0; i < 5; i++) await app.deps.announcer.reconcileAsk();
+  assert.equal(eventReads(host), 1, 'later frames read only the instance list');
+  assert.equal(mcpReads(host).length, 1);
+  assert.equal(listReads(host), lists + 5);
+  assert.equal(announces(sse).length, 1);
+});
+
+test('a row ask with no matching event settles after one probe; a new ask state probes again', async (t) => {
+  const { host, app, sse } = await setup(t);
+  host.requests.length = 0;
+  // The row claims an ask, but the events window holds no such event.
+  host.setRow('cond-a', { awaitingUser: 'plan', awaitingUserSource: 'tool', lastResponseAt: 50 });
+  for (let i = 0; i < 4; i++) await app.deps.announcer.reconcileAsk();
+  assert.equal(eventReads(host), 1);
+  assert.equal(mcpReads(host).length, 0);
+  // A different ask state is probed, and a real ask is then announced.
+  host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, notify: false, frames: false });
+  await app.deps.announcer.reconcileAsk();
+  assert.equal(eventReads(host), 2);
+  await settle(app, sse);
+  assert.equal(announces(sse).length, 1);
+});
+
+// ---- oversized questions ----
+
+const BIG = Array.from({ length: 10 }, (_, q) => ({
+  question: `Question ${q + 1}?`,
+  header: `H${q + 1}`,
+  multiSelect: false,
+  options: Array.from({ length: 6 }, (_, o) => ({ label: `Q${q + 1}-Option-${o + 1}`, description: 'long description '.repeat(12) })),
+}));
+
+test('an oversized questions section keeps every label, is flagged truncated, and ask.count stays true', async (t) => {
+  const { host, sse } = await setup(t);
+  host.finishAsk('cond-a', { kind: 'question', questions: BIG, prose: 'Lots of questions.' });
+  const ev = await sse.next('announce');
+  assert.ok(ev.data.text.length <= 4000);
+  assert.deepEqual(ev.data.ask, { kind: 'question', count: 10, truncated: true });
+  for (let q = 1; q <= 10; q++) for (let o = 1; o <= 6; o++) assert.ok(ev.data.text.includes(`Q${q}-Option-${o}`), `Q${q}-Option-${o}`);
+  assert.ok(ev.data.text.includes('…'), 'descriptions were shortened');
+});
+
+test('a questions section that fits is not flagged', async (t) => {
+  const { host, sse } = await setup(t);
+  host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, prose: 'word '.repeat(2000) });
+  assert.deepEqual((await sse.next('announce')).data.ask, { kind: 'question', count: 2 });
 });

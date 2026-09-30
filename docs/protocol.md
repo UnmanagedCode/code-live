@@ -53,7 +53,7 @@ Each frame is `id: <boot>-<n>` / `event: <name>` / `data: <json>`. `<boot>` is r
 |---|---|---|
 | `target` | `{sessionId, title}` or `null` | on connect (**no id**; the current target, or `null` unless it is a live conductor row the host confirms), and on every target change |
 | `host` | `{connected:boolean}` | on connect (no id), and when the backend's host `/ws` link opens or closes |
-| `announce` | `{sessionId, title, text, turnSeq, isError, ask}` | when the active target finishes a turn. `text` is at most 4000 chars, or `(turn finished with no text reply)`. `ask` is `{kind:"question", count}` (AskUserQuestion pending; `text` holds the `--- questions ---` section), `{kind:"plan", planPath:string\|null}` (ExitPlanMode pending), or `null` |
+| `announce` | `{sessionId, title, text, turnSeq, isError, ask}` | when the active target finishes a turn. `text` is at most 4000 chars, or `(turn finished with no text reply)`. `ask` is `{kind:"question", count, truncated?}` (AskUserQuestion pending; `text` holds the `--- questions ---` section; `truncated:true` means option descriptions were shortened to fit 4000 chars), `{kind:"plan", planPath:string\|null}` (ExitPlanMode pending), or `null` |
 
 - **Replay:** the backend keeps the last 20 id-bearing events.
   - A request with `Last-Event-ID` from this process gets every ring event after it.
@@ -119,6 +119,7 @@ Failures are `{ok:false, code, message}`:
 | `NO_PENDING_PLAN` | the row shows no unanswered tool plan, or the host's latest messages hold none; the message names which |
 | `CONFIRMATION_REQUIRED` | `approve_conductor_plan` without `confirmed: true` |
 | `INVALID_OPTION` | a choice matches no option, or several; carries `question` and `offered` |
+| `NOT_MULTISELECT` | several choices for a question the host treats as single-choice (only when its options could not be read first); carries the 1-based `question` |
 | `TOO_MANY_CHOICES` | several choices for a single-choice question; carries `question` and `offered` |
 | `ANSWER_COUNT_MISMATCH` | more answer entries than questions |
 | `HOST_MCP_ERROR` | `/mcp` returned a JSON-RPC error, an `isError` result, or an unreadable result; the message carries the host's text |
@@ -132,14 +133,14 @@ Failures are `{ok:false, code, message}`:
 - **Explicit `count`:** exactly that many messages, literally and without bonding, as the host treats an explicit count.
 - Each `text` is the message body as the host renders it: prose, then a `--- plan ---` / `--- plan · saved to <path> ---` section and a `--- questions ---` section (`N. <question> (multiSelect: <bool>) · header: <h>`, then `   - <label>: <description>` per option) in the order they occurred. The host's `--- message i/N … ---` boundary line is dropped.
 - `hasPlan`, `planPath` and `questionCount` appear only on the message that carries them.
-- A `text` over 4000 chars keeps a trailing questions section whole and cuts the prose before it; anything else is cut from the end.
+- A `text` over 4000 chars keeps a trailing questions section whole and cuts the prose before it. A questions section that alone exceeds 4000 chars is shortened line by line, option descriptions before labels, and the message gets `questionsTruncated:true`. Anything else is cut from the end.
 - If the `/mcp` read fails, or the session has no host session id yet, the result is the last `count` (default 1) assistant text messages from the events route, as `[{text}]`, and the failure is logged.
 
 ### Answering and deciding
 
 - **Pending gates** use the session row's `awaitingUser` / `awaitingUserSource`, because the host's `answer_question` and `approve_plan` do not check that anything is pending. A question needs `awaitingUser === "question"` and `awaitingUserSource === "tool"`. A plan needs `"plan"` and `"tool"`, and a fresh `get_recent_messages` that has a message with `hasPlan`.
 - **Choice resolution**, first match wins: exact label, option number (`2`, `option 2`), label equal after folding case, whitespace and punctuation, equal with a trailing parenthetical such as ` (Recommended)` dropped, then a unique partial match. No match, or several at one step, is `INVALID_OPTION`.
-- The question structure comes from the newest `user_question` event (`GET /api/instances/:id/events`). If none is found, choices pass through to the host unchanged.
+- The question structure comes from the newest top-level (no `parentToolUseId`) `user_question` event (`GET /api/instances/:id/events`). If none is found, choices pass through to the host unchanged.
 - **Retry:** when the host answers `INVALID_OPTION` with its `offered` labels, the spoken words are resolved once against those labels and the call is repeated once. A second refusal is returned as `INVALID_OPTION` with `question` and `offered`.
 - **Approval:** `confirmed` must be exactly `true`, else `CONFIRMATION_REQUIRED` with no host call at all. The host switches a plan-mode conductor to `bypassPermissions` on approval. Reject keeps plan mode.
 - Missing trailing answer entries are skipped; extra entries are `ANSWER_COUNT_MISMATCH`.
@@ -155,7 +156,7 @@ All calls go to `$CONDUCTOR_URL`, with a 5 s timeout for REST.
 |---|---|
 | list sessions | `GET /api/instances`. Conductor rows have `project === ".conduct"` |
 | create a conductor | `POST /api/projects/.conduct/ensure` (no body), then `POST /api/instances` with `{"project":".conduct","role":"conductor","temp":true,"mode":"bypassPermissions"}` → 201 summary |
-| read events | `GET /api/instances/:id/events?limit=500`. Uses `kind`/`_seq`, `assistant_message.message.content[].{type,text}` and `turn_end.isError` |
+| read events | `GET /api/instances/:id/events?limit=500`. Uses `kind`/`_seq`/`lastSeq`, `assistant_message.{msgId,message.content[].{type,text}}`, `turn_end.isError`, `user_question.{toolUseId,questions}` and `plan_request.{toolUseId,plan,planPath,autoApproved}`. Events with `parentToolUseId` (sub-agents) are ignored, as the host's own turn reconstruction does |
 | send a prompt | WS `/ws`: `{"t":"prompt","id":"<instance id>","text":"…","reqId":"code-live-<n>"}` → `{"t":"ack","reqId","ok","error"?}` |
 | turn ends | WS `/ws` broadcast `{"t":"turn_notification","id","project","isError","stopReason","cost"}` |
 | instance list changed | WS `/ws` broadcast `{"t":"instances",…}`. Only its arrival matters: the row is re-read over REST. Other frame types are ignored |

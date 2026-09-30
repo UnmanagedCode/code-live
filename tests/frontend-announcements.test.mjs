@@ -105,3 +105,11 @@ test('hostile plan, question and title text renders as text, never as elements',
   assert.ok(root.textContent.includes(evil));
   assert.equal(sent.length, 2);
 });
+
+test('a question announce whose options were shortened says so in its final line', async () => {
+  const { es, sent } = await setup('live');
+  es.emit('announce', { sessionId: 'c', title: 'Alpha', text: 'Q', ask: { kind: 'question', count: 10, truncated: true } });
+  es.emit('announce', { sessionId: 'c', title: 'Alpha', text: 'Q', ask: { kind: 'question', count: 10 } });
+  assert.match(sent[0], /AWAITING ANSWER: 10 question\(s\)\. Use answer_conductor_question\. Some options above were shortened: say so, and let the user pick by option number\.$/);
+  assert.match(sent[1], /answer_conductor_question\.$/, 'an untruncated ask has no note');
+});

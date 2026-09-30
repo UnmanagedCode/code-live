@@ -68,7 +68,7 @@ test('create ensures .conduct, spawns a conductor and makes it active', async (t
   assert.equal(r.activeTargetChanged, true);
   assert.deepEqual(r.activeTarget, { sessionId: 'new-conductor-1', title: 'Untitled conductor' });
   assert.equal(r.session.sessionId, 'new-conductor-1');
-  assert.deepEqual(app.deps.state.get(), { activeTargetId: 'new-conductor-1', lastHandledTurnSeq: -1, lastHandledMsgId: null });
+  assert.deepEqual(app.deps.state.get(), { activeTargetId: 'new-conductor-1', lastHandledTurnSeq: -1, lastHandledMsgId: null, lastHandledAskId: null });
 });
 
 test('send to the active target prompts over /ws without a target change', async (t) => {
@@ -465,4 +465,60 @@ test('read falls back to the /events prose, logged, when the MCP read fails or t
   assert.deepEqual((await callTool(app, 'read_conductor_messages')).messages, [{ text: 'two' }]);
   assert.equal(host.mcpCalls.length, 0);
   assert.ok(logged.mock.calls.some((c) => /no host session id/.test(String(c.arguments[0]))));
+});
+
+// ---- review fixes ----
+
+test('the host\'s 0-based NOT_MULTISELECT question index is reported 1-based', async (t) => {
+  const { host, app } = await setup(t, { active: 'cond-a' });
+  // The row shows a question but its event is out of reach, so choices pass through unchecked.
+  host.setRow('cond-a', { awaitingUser: 'question', awaitingUserSource: 'tool' });
+  for (const index of [0, 2]) {
+    host.setMcp('answer_question', () => mcpSoft('NOT_MULTISELECT', `Question ${index} is single-choice; use { option } not { options }.`, { questionIndex: index }));
+    const r = await callTool(app, 'answer_conductor_question', { answers: [{ choices: ['1', '2'] }] });
+    assert.deepEqual([r.ok, r.code, r.question], [false, 'NOT_MULTISELECT', index + 1]);
+    assert.doesNotMatch(r.message, new RegExp(`Question ${index}\\b`), 'the host\'s 0-based wording is not repeated');
+    assert.match(r.message, new RegExp(`Question ${index + 1} takes a single choice`));
+  }
+});
+
+const BIG = Array.from({ length: 10 }, (_, q) => ({
+  question: `Question ${q + 1}?`,
+  header: `H${q + 1}`,
+  multiSelect: false,
+  options: Array.from({ length: 6 }, (_, o) => ({ label: `Q${q + 1}-Option-${o + 1}`, description: 'long description '.repeat(12) })),
+}));
+
+test('answering an oversized question set still uses the untruncated options; a read flags the cut', async (t) => {
+  const { host, app } = await setup(t, { active: 'cond-a' });
+  host.finishAsk('cond-a', { kind: 'question', questions: BIG, frames: false });
+  host.mcpCalls.length = 0;
+  const read = await callTool(app, 'read_conductor_messages');
+  assert.equal(read.messages[0].questionCount, 10);
+  assert.equal(read.messages[0].questionsTruncated, true);
+  assert.ok(read.messages[0].text.length <= 4000);
+  host.setMcp('answer_question', () => mcpOk({ sessionId: 's-a', mode: 'plan', sentText: 't' }));
+  const r = await callTool(app, 'answer_conductor_question', { answers: BIG.map((_, i) => ({ choices: [i === 9 ? '6' : '1'] })) });
+  assert.equal(r.ok, true);
+  const sent = called(host, 'answer_question')[0].arguments.answers;
+  assert.deepEqual(sent[9], { option: 'Q10-Option-6' }, 'option 6 of question 10 resolves though the announced text had to shorten it');
+  assert.equal(sent.length, 10);
+});
+
+test('a read of questions that fit carries no truncation flag', async (t) => {
+  const { host, app } = await setup(t, { active: 'cond-a' });
+  host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, frames: false });
+  const [m] = (await callTool(app, 'read_conductor_messages')).messages;
+  assert.equal('questionsTruncated' in m, false);
+});
+
+test('a sub-agent question event is not the conductor\'s pending question', async (t) => {
+  const { host, app } = await setup(t, { active: 'cond-a' });
+  host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, frames: false });
+  // A later sub-agent question with other labels must not be the one answers map against.
+  host.addEvent('cond-a', { kind: 'user_question', parentToolUseId: 'toolu_task', toolUseId: 'sub', questions: [{ question: 'Sub?', options: [{ label: 'Other' }] }] });
+  host.setMcp('answer_question', () => mcpOk({ sessionId: 's-a', mode: 'plan', sentText: 't' }));
+  const r = await callTool(app, 'answer_conductor_question', { answers: [{ choices: ['sqlite'] }, { choices: ['test'] }] });
+  assert.equal(r.ok, true);
+  assert.deepEqual(called(host, 'answer_question')[0].arguments.answers, [{ option: 'SQLite' }, { options: ['Test'] }]);
 });

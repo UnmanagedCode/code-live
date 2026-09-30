@@ -68,9 +68,10 @@ Failures come back to Gemini as `ok:false` with a code, and Gemini explains them
 
 When the active conductor ends a turn on a question or a plan, the announcement includes it, and Gemini acts on it.
 
-- **Questions:** Gemini reads each question with its numbered options and asks you. Answer with the option number or its words (`the second`, `sqlite`). A multi-select question takes several options, a question can be answered with your own words instead, and a remark can go along with a choice. Skipped questions are left unanswered. If an option can't be matched, Gemini reads the options back and asks again.
+- **Questions:** Gemini reads each question with its numbered options and asks you. A very long set of questions has its option descriptions shortened (labels stay), and Gemini says so; option numbers still work. Answer with the option number or its words (`the second`, `sqlite`). A multi-select question takes several options, a question can be answered with your own words instead, and a remark can go along with a choice. Skipped questions are left unanswered. If an option can't be matched, Gemini reads the options back and asks again.
 - **Plans:** Gemini summarizes the plan and asks whether to approve or reject it.
-  - **Approve:** Gemini first says that approving lets the conductor run without permission prompts, and waits for an explicit yes. The confirmation is enforced by Gemini's instructions and the tool's `confirmed` flag, not checked against your speech.
+  - **Approve:** Gemini first says that approving lets the conductor run without permission prompts, and waits for an explicit yes. The confirmation is enforced by Gemini's instructions and the tool's `confirmed` flag, not checked against your speech. It guards against a misheard utterance and is not a security boundary: conductor-written text reaches Gemini and could itself prompt an approval, which grants nothing a conductor cannot already do through the open host API.
   - **Reject:** say what to change. The conductor stays in plan mode and revises the plan.
+- A question or plan that is still waiting is announced once even if the conductor has run other turns since.
 - These work only while the conductor is actually waiting. Once it has been answered (here or in the code-conductor UI), a further answer or decision is refused.
 - They act on the active target only, and depend on the host's `/mcp` endpoint (see the README's known limitations).

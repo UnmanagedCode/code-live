@@ -28,11 +28,13 @@ function renderQuestions(questions) {
 // The text-bearing assistant messages of an event ring, like cc's
 // reconstructMessages: a user_question / plan_request attaches to the
 // assistant message before it, and `turn` counts the turn_ends before it.
+// Sub-agent events (parentToolUseId) are skipped, as the host does.
 function reconstruct(events) {
   const messages = [];
   let turn = 0;
   let last = null;
   for (const ev of events) {
+    if (ev.parentToolUseId) continue;
     if (ev.kind === 'assistant_message') {
       last = { msgId: ev.msgId ?? `m${ev._seq}`, text: proseOf(ev), turn };
       messages.push(last);
