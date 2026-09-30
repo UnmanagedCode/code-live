@@ -7,7 +7,7 @@ User-facing behavior of the Code Live page and its voice tools. Wire shapes are 
 | region | contents |
 |---|---|
 | status bar | session state pill (`idle`, `connecting`, `live`, `reconnecting`, `error`) the `Mic paused` pill (shown only while the mic is paused), and the host indicator (`Host connected` / `Host disconnected`: the backend's link to code-conductor's `/ws`) |
-| controls | **Model** select (the pinned models from `GET api/models`; a model with a `hint` shows it after the label, e.g. `Gemini 3.8 Live Extended Thinking (tool calls unreliable)`), **Connect**, **Pause mic** / **Resume mic**, **Disconnect** |
+| controls | **Model** select (the pinned models from `GET api/models`; a model with a `hint` shows it after the label, e.g. `Gemini 3.8 Live Extended Thinking (tool calls usually fail)`), **Connect**, **Pause mic** / **Resume mic**, **Disconnect** |
 | target picker | **Conductor** select listing live conductor sessions as `<title> (<status>)` (`<status>` is the run state `list_conductor_sessions` reports: [protocol](protocol.md#tool-results)), plus `— no active conductor —`; **Refresh** reloads it. Choosing one sets the active target |
 | transcript | You / Gemini transcription bubbles, tool calls and results as JSON, conductor announcements, status and error lines |
 | Settings (collapsible) | Gemini API key: password field, **Save**, **Clear**, and the status `Key set (••••<last 4>)` or `No key set` |

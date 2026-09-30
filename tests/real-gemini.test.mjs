@@ -12,9 +12,11 @@ import { MODELS } from '../src/models.js';
 import { createLiveSession } from '../public/liveSession.js';
 
 const RUN = process.env.RUN_REAL_GEMINI === '1';
-// On the real API this model usually never delivers a toolCall (the model
-// then reports a system error), whatever the setup; its hint in MODELS says
-// so. Its smoke test checks connect and spoken replies only.
+// On the real API this model usually never delivers a toolCall: after its
+// filler it says a system error occurred or goes silent. The setup already
+// meets the model doc's async-only rules (NON_BLOCKING, no scheduling), so the
+// failure is upstream; the README known limitation gives the conditions that
+// reproduce it. Its smoke test checks connect and spoken replies only.
 const CONNECT_ONLY = new Set(['gemini-3.8-live-extended-thinking']);
 const TIMEOUT = 60000;
 

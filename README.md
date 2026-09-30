@@ -41,7 +41,7 @@ Open **Settings** at the bottom of the Code Live page, paste a Gemini API key, a
 | id | label | setup requirements |
 |---|---|---|
 | `gemini-3.8-live` | Gemini 3.8 Live | none |
-| `gemini-3.8-live-extended-thinking` | Gemini 3.8 Live Extended Thinking | `thinkingConfig.thinkingLevel: "low"`; every function `behavior: "NON_BLOCKING"`. Tool calls are unreliable (see known limitations) |
+| `gemini-3.8-live-extended-thinking` | Gemini 3.8 Live Extended Thinking | `thinkingConfig.thinkingLevel: "low"`; every function `behavior: "NON_BLOCKING"`. Tool calls usually fail (see known limitations) |
 | `gemini-3.1-flash-live-preview` | Gemini 3.1 Flash Live Preview | none |
 
 The catalog, per-model settings and the picker hints (the `hint` field) live in `src/models.js`. Every setup sets `responseModalities: ["AUDIO"]` explicitly.
@@ -105,7 +105,18 @@ The backend exits with an error if `PROJECTS_ROOT` or `CONDUCTOR_URL` is missing
 - A reconcile after downtime can announce a turn the host would have suppressed: a conductor pausing while it waits on a worker.
 - Gemini connections recycle about every 10 minutes. The client resumes with the latest handle (valid for 2 hours after a disconnect).
 - Ephemeral tokens are a `v1beta` preview feature of the Gemini API.
-- **`gemini-3.8-live-extended-thinking` tool calls are unreliable.** On the real API, with `thinkingLevel: "low"` and `NON_BLOCKING` functions, the server often never sends the `toolCall`, and the model then says a system error occurred. In a sample of 9 prompts asking for `list_conductor_sessions`, 2 got through. Other setups failed too: without `behavior`, without empty `parameters`, with a single tool, without the system prompt, and with `thinkingLevel` `medium` or `high` (every run failed). The other two models got the tool call every time. The picker labels this model `(tool calls unreliable)`, and its real smoke test checks only connection and spoken replies.
+- **`gemini-3.8-live-extended-thinking` tool calls usually fail, upstream.** The server usually never sends the `toolCall`: after the spoken filler (a `turnComplete` with `interactionStatus: IN_PROGRESS`) the model says a system error occurred or goes silent. The setup meets every tool rule on the [model page](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-live-extended-thinking): every function is `NON_BLOCKING`, no `scheduling` is sent, and `thinkingLevel` is `low`.
+  - **Reproduce:** one `realtimeInput.text` asking for `list_conductor_sessions`, sent over the `buildSetup` setup on a v1beta ephemeral token (`BidiGenerateContentConstrained`). In 10 sequential runs this model got a `toolCall` 0 times; `gemini-3.8-live` got one 10 times and `gemini-3.1-flash-live-preview` completed the round-trip 10 times.
+  - **Settings that don't change the result:**
+    - the `v1alpha` `BidiGenerateContent` endpoint with the API key
+    - `thinkingLevel` `LOW`, `medium` or `high`
+    - `includeThoughts`
+    - no `behavior`
+    - a single tool, or the model page's own `searchFlights` example
+    - no system prompt
+    - no compression, resumption or transcription
+    - `clientContent` instead of `realtimeInput.text`
+  - The picker labels the model with its `hint` from `MODELS`, and its real smoke test checks only connection and spoken replies.
 - **The microphone can stay open with no Code Live UI on screen.** The page is kept alive when you leave its view, so Gemini keeps listening and can act on what it hears (approval still needs a spoken yes). The cues are `Code Live (running)` in code-conductor's switcher and the browser's recording indicator. Use **Pause mic** or **Disconnect** before leaving. Stop/Disable, or a Restart/Update from Settings → Plugins, ends the page and the call.
 - Use headphones: speaker audio can echo back into the microphone.
 - The key's last 4 characters are shown in Settings.

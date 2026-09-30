@@ -4,7 +4,7 @@
 // hint: a caveat shown next to the label in the model picker.
 export const MODELS = [
   { id: 'gemini-3.8-live', label: 'Gemini 3.8 Live' },
-  { id: 'gemini-3.8-live-extended-thinking', label: 'Gemini 3.8 Live Extended Thinking', thinkingLevel: 'low', toolBehavior: 'NON_BLOCKING', hint: 'tool calls unreliable' },
+  { id: 'gemini-3.8-live-extended-thinking', label: 'Gemini 3.8 Live Extended Thinking', thinkingLevel: 'low', toolBehavior: 'NON_BLOCKING', hint: 'tool calls usually fail' },
   { id: 'gemini-3.1-flash-live-preview', label: 'Gemini 3.1 Flash Live Preview' },
 ];
 

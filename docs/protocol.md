@@ -64,7 +64,7 @@ Each frame is `id: <boot>-<n>` / `event: <name>` / `data: <json>`. `<boot>` is r
 
 ## Tools
 
-The declarations are `DECLARATIONS` in `src/tools.js`, with parameter types in Gemini schema form (`OBJECT`/`STRING`/`INTEGER`). For `gemini-3.8-live-extended-thinking`, each declaration also carries `behavior: "NON_BLOCKING"`.
+The declarations are `DECLARATIONS` in `src/tools.js`, with parameter types in Gemini schema form (`OBJECT`/`STRING`/`INTEGER`). For `gemini-3.8-live-extended-thinking`, each declaration also carries `behavior: "NON_BLOCKING"`: the model rejects blocking declarations and supports no function `scheduling`, so the `toolResponse` never carries one ([model page](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-live-extended-thinking)).
 
 | name | parameters |
 |---|---|
@@ -212,7 +212,7 @@ The page connects to `wss://generativelanguage.googleapis.com/ws/google.ai.gener
 | `{"realtimeInput":{"audio":{"data":"<b64>","mimeType":"audio/pcm;rate=16000"}}}` | mic chunks (16-bit LE mono) while the mic is not paused |
 | `{"realtimeInput":{"audioStreamEnd":true}}` | `pauseMic()` while live, once per pause |
 | `{"realtimeInput":{"text":"CONDUCTOR UPDATE from \"<title>\":\n<text>"}}` | announcements; does not interrupt current speech |
-| `{"toolResponse":{"functionResponses":[{"id","name","response":<tool result>}]}}` | after each tool call, unless cancelled |
+| `{"toolResponse":{"functionResponses":[{"id","name","response":<tool result>}]}}` | after each tool call, unless cancelled; no `scheduling` field |
 
 **Gemini → client:**
 
