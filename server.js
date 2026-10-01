@@ -20,8 +20,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
 const STATUS_BY_CODE = {
-  INVALID_KEY: 400, INVALID_ARGS: 400, UNKNOWN_MODEL: 400, NOT_A_CONDUCTOR: 400,
-  UNKNOWN_SESSION: 404, SESSION_GONE: 404, NO_API_KEY: 409, AMBIGUOUS_SESSION: 409,
+  INVALID_KEY: 400, INVALID_ARGS: 400, UNKNOWN_MODEL: 400, NO_API_KEY: 409,
   GEMINI_ERROR: 502, HOST_UNAVAILABLE: 502, HOST_HTTP_ERROR: 502, STORE_CORRUPT: 500,
 };
 
@@ -37,7 +36,7 @@ export async function buildDeps(config, opts = {}) {
   const link = createCcLink({ url: config.hostWsUrl, ...(opts.link ?? {}) });
   const hostMcp = createHostMcp({ baseUrl: config.conductorUrl, ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}) });
   const announcer = createAnnouncer({ api, link, state, publish, hostMcp });
-  const service = createConductorService({ api, link, state, announcer, publish, hostMcp });
+  const service = createConductorService({ api, link, announcer, hostMcp });
   const gemini = createGemini({ base: config.geminiBase, wsUrl: config.geminiWsUrl, keyStore, ...(opts.now ? { now: opts.now } : {}) });
   link.on('open', () => publish('host', { connected: true }));
   link.on('close', () => publish('host', { connected: false }));

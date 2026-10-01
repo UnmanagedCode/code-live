@@ -3,7 +3,6 @@
 import { createApi } from './api.js';
 import { createTranscript } from './transcript.js';
 import { installSettings } from './settings.js';
-import { installTargetPicker } from './targetPicker.js';
 import { createLiveSession } from './liveSession.js';
 import { installAnnouncements } from './announcements.js';
 import { createEventStream } from './events.js';
@@ -19,7 +18,6 @@ const CHUNK_SECONDS = 0.1;
 const api = createApi();
 const transcript = createTranscript($('transcript'));
 installSettings($('settings'), api);
-const targetPicker = installTargetPicker($('target'), api, { onError: (e) => transcript.add('error', e.message) });
 const hostIndicator = {
   set(connected) {
     $('host').textContent = connected ? 'Host connected' : 'Host disconnected';
@@ -113,7 +111,6 @@ $('disconnect').addEventListener('click', () => session.disconnect());
 api.getModels()
   .then(({ models }) => $('model').replaceChildren(...models.map((m) => el('option', { value: m.id }, m.hint ? `${m.label} (${m.hint})` : m.label))))
   .catch((e) => transcript.add('error', `Loading models failed: ${e.message}`));
-targetPicker.load();
 
 const eventSource = createEventStream({ url: 'api/events' });
-installAnnouncements({ eventSource, transcript, session, targetPicker, hostIndicator });
+installAnnouncements({ eventSource, transcript, session, hostIndicator });

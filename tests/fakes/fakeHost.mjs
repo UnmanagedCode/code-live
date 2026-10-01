@@ -65,7 +65,8 @@ function selectMessages(all, count) {
 }
 
 export async function startFakeHost({ instances = [], events = {}, port = 0 } = {}) {
-  const state = { instances: instances.map((i) => ({ ...i })), events: {} };
+  // `eventsGone` ids stay listed but their events route answers 404.
+  const state = { instances: instances.map((i) => ({ ...i })), events: {}, eventsGone: new Set() };
   const seqs = {};
   const requests = [];
   const prompts = [];
@@ -136,7 +137,7 @@ export async function startFakeHost({ instances = [], events = {}, port = 0 } = 
     const m = url.pathname.match(/^\/api\/instances\/([^/]+)\/events$/);
     if (req.method === 'GET' && m) {
       const id = decodeURIComponent(m[1]);
-      if (!state.instances.some((i) => i.id === id)) return json(res, 404, { error: 'unknown instance' });
+      if (!state.instances.some((i) => i.id === id) || state.eventsGone.has(id)) return json(res, 404, { error: 'unknown instance' });
       const limit = Number(url.searchParams.get('limit')) || 500;
       const all = state.events[id] ?? [];
       const evs = all.slice(-limit);
