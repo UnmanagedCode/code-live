@@ -11,6 +11,8 @@ User-facing behavior of the Code Live page and its voice tools. Wire shapes are 
 | transcript | You / Gemini transcription bubbles, tool calls and results as JSON, conductor announcements, status and error lines |
 | Settings (collapsible) | Gemini API key: password field, **Save**, **Clear**, and the status `Key set (••••<last 4>)` or `No key set` |
 
+The page is dark-only and uses code-conductor's shell colours, whatever the OS colour scheme.
+
 ## Connecting
 
 - **Connect** creates the audio context (it needs a user gesture), mints a token for the selected model, and opens the Gemini Live socket. When the session is `live`, the microphone starts: echo cancellation and noise suppression on, mono, sent as 16 kHz PCM in ~100 ms chunks.

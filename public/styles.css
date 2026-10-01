@@ -1,31 +1,42 @@
+/* The host injects no theme into the plugin iframe, so these values are copied
+   from the :root block of code-conductor's shell stylesheet (public/styles.css). */
 :root {
-  color-scheme: light dark;
-  --bg: #fafafa; --fg: #1d1d1f; --muted: #6b6b70; --border: #d9d9de;
-  --accent: #2f6fed; --ok: #1f9d55; --warn: #c27c0e; --bad: #d23c3c;
-  --bubble: #ffffff;
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-}
-@media (prefers-color-scheme: dark) {
-  :root { --bg: #17171a; --fg: #ececf0; --muted: #9a9aa2; --border: #34343a; --bubble: #222226; }
+  --bg: #0f1117;
+  --panel: #151823;
+  --panel-2: #1d2130;
+  --text: #d8dae6;
+  --muted: #8a90a3;
+  --accent: #6ea8ff;
+  --ok: #4ade80;
+  --warn: #f59e0b;
+  --bad: #f87171;
+  --border: #232838;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  color-scheme: dark;
 }
 * { box-sizing: border-box; }
-body { margin: 0; height: 100vh; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); }
+body { margin: 0; height: 100vh; display: flex; flex-direction: column; background: var(--bg); color: var(--text); }
 h1 { font-size: 1.1rem; margin: 0 auto 0 0; }
 .statusbar, .controls { display: flex; gap: .6rem; align-items: center; padding: .5rem 1rem; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.statusbar { background: var(--panel); }
 .pill { font-size: .8rem; padding: .15rem .6rem; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
 .pill[data-state="live"], .pill[data-state="on"] { color: var(--ok); border-color: var(--ok); }
 .pill[data-state="connecting"], .pill[data-state="reconnecting"], .pill[data-state="paused"] { color: var(--warn); border-color: var(--warn); }
 .pill[data-state="error"] { color: var(--bad); border-color: var(--bad); }
-button { font: inherit; padding: .3rem .9rem; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
-button.secondary { background: transparent; color: var(--fg); border-color: var(--border); }
+button { font: inherit; font-weight: 600; padding: .3rem .9rem; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #0a0c12; cursor: pointer; }
+button:hover:not(:disabled) { background: #8cb9ff; border-color: #8cb9ff; }
+button.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); font-weight: inherit; }
+button.secondary:hover:not(:disabled) { background: #262b3d; border-color: var(--border); }
 button:disabled { opacity: .5; cursor: default; }
-select, input { font: inherit; padding: .25rem .4rem; border-radius: 6px; border: 1px solid var(--border); background: var(--bubble); color: var(--fg); }
+select, input { font: inherit; padding: .25rem .4rem; border-radius: 6px; border: 1px solid var(--border); background: var(--panel-2); color: var(--text); }
+input:focus, select:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
 .transcript { flex: 1; overflow-y: auto; padding: 1rem; display: flex; flex-direction: column; gap: .5rem; }
-.entry { max-width: 52rem; padding: .5rem .75rem; border-radius: 8px; background: var(--bubble); border: 1px solid var(--border); }
+.entry { max-width: 52rem; padding: .5rem .75rem; border-radius: 8px; background: var(--panel); border: 1px solid var(--border); }
 .entry-label { font-size: .75rem; color: var(--muted); margin-bottom: .2rem; }
 .entry-body { white-space: pre-wrap; overflow-wrap: anywhere; }
 pre.entry-body { margin: 0; font-size: .8rem; }
-.entry-you { align-self: flex-end; border-color: var(--accent); }
+.entry-you { align-self: flex-end; background: var(--panel-2); border-color: var(--accent); }
 .entry-conductor { border-left: 4px solid var(--ok); }
 .entry-tool_call, .entry-tool_result, .entry-status { font-size: .85rem; color: var(--muted); }
 .entry-error { border-color: var(--bad); color: var(--bad); }
