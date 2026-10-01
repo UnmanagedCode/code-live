@@ -6,12 +6,20 @@ export const ASK_PLAN_MARK = 'AWAITING PLAN APPROVAL';
 
 // What a conductor writes (its title, its reply, a plan path) reaches Gemini
 // inside an update whose header and footer name the session to act on, so none
-// of it may pose as either: a title and path stay on one line (a title also
-// loses its quotes), and a reply line that starts with a marker is prefixed.
-const oneLine = (s) => String(s).replace(/[\r\n\u2028\u2029]+/g, ' ');
+// of it may pose as either. Everything interpolated stays on one line (a title
+// also loses its quotes); in a reply, a line that would read as a header or
+// footer once invisible characters are dropped, Unicode spaces are plain spaces
+// and case is ignored is prefixed with "> ". Every Unicode line separator
+// starts a line.
+const BREAKS = '\\n\\r\\v\\f\\u0085\\u2028\\u2029';
+const oneLine = (s) => String(s).replace(new RegExp(`[${BREAKS}]+`, 'g'), ' ');
 const safeTitle = (title) => oneLine(title).replaceAll('"', "'");
-const MARKER_LINE = new RegExp(`^([ \\t]*)(${ANNOUNCE_PREFIX}|AWAITING )`, 'gm');
-const safeBody = (text) => String(text).replace(MARKER_LINE, '$1> $2');
+const BREAK_SPLIT = new RegExp(`(\\r\\n|[${BREAKS}])`);
+const INVISIBLE = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
+const MARKER = new RegExp(`^ *(?:${ANNOUNCE_PREFIX.replaceAll(' ', ' +')}|AWAITING(?= ))`, 'i');
+const readsAsMarker = (line) => MARKER.test(line.replace(INVISIBLE, '').replace(/\s/gu, ' '));
+// split() with a capture group alternates lines and the breaks between them.
+const safeBody = (text) => String(text).split(BREAK_SPLIT).map((part, i) => (i % 2 === 0 && readsAsMarker(part) ? `> ${part}` : part)).join('');
 
 // The line that ends an update whose turn stopped on a question or plan.
 function askFooter(ask, sessionId) {
@@ -34,8 +42,9 @@ export function installAnnouncements({ eventSource, transcript, session, hostInd
     const a = parse(ev);
     if (!a) return;
     transcript.add('conductor', a.text, { title: a.title, ...(a.ask?.kind ? { ask: a.ask.kind } : {}) });
-    const footer = askFooter(a.ask, a.sessionId);
-    if (session.state === 'live') session.sendText(`${ANNOUNCE_PREFIX} from "${safeTitle(a.title)}" (session ${a.sessionId}):\n${safeBody(a.text)}${footer ? `\n${footer}` : ''}`);
+    const sessionId = oneLine(a.sessionId);
+    const footer = askFooter(a.ask, sessionId);
+    if (session.state === 'live') session.sendText(`${ANNOUNCE_PREFIX} from "${safeTitle(a.title)}" (session ${sessionId}):\n${safeBody(a.text)}${footer ? `\n${footer}` : ''}`);
   });
   eventSource.addEventListener('host', (ev) => {
     const h = parse(ev);

@@ -644,6 +644,29 @@ test('a failed host write puts the ask back: the question or plan is announced a
   assert.equal(announces(sse).length, 2, 'each ask is announced once');
 });
 
+test('an undo leaves a newer ask announced while the write was in flight handled, and announces nothing twice', async (t) => {
+  const { host, app, sse } = await setup(t);
+  t.mock.method(console, 'error', () => {});
+  await app.deps.announcer.reconcile(); // flushes the ask reconcile that watching queued
+  host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, prose: 'First.', notify: false, frames: false });
+  let release;
+  const held = new Promise((r) => { release = r; });
+  host.setMcp('answer_question', async () => { await held; return mcpThrown('kaboom'); });
+  const failing = callTool(app, 'answer_conductor_question', { session: 'cond-a', answers: [{ choices: ['1'] }, { choices: ['1'] }] });
+  await waitFor(() => host.mcpCalls.some((c) => c.name === 'answer_question'), { what: 'the answer write to start' });
+  // While the write is in flight a newer question lands and is announced.
+  host.finishAsk('cond-a', { kind: 'question', questions: [QUESTIONS[0]], prose: 'Third.', notify: false, frames: false });
+  await app.deps.announcer.reconcileAsk();
+  await sse.next('announce', (d) => d.text.startsWith('Third.'));
+  release();
+  assert.equal((await failing).code, 'HOST_MCP_ERROR');
+  await app.deps.announcer.reconcile();
+  await settle(app, sse);
+  const newest = host.state.events['cond-a'].findLast((e) => e.kind === 'user_question').toolUseId;
+  assert.equal(cursor(app).lastHandledAskId, newest, 'the undo did not restore the older mark');
+  assert.deepEqual(announces(sse).map((a) => a.text.split('\n')[0]), ['Third.'], 'the newer ask is announced once and the answered one not at all');
+});
+
 test('a conductor whose events route 404s while still listed is pruned from the announced set', async (t) => {
   const { host, app, sse } = await setup(t, { watch: ['cond-a', 'cond-b'] });
   host.state.eventsGone.add('cond-a');
