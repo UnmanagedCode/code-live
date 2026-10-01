@@ -1,6 +1,7 @@
 // Pins: model-written content of every kind renders as inert text (hostile
 // markup creates no elements), tool payloads render as JSON text, and
-// transcription chunks merge per speaker until the turn ends.
+// transcription chunks merge per speaker until the turn ends. A divider is
+// inert text and ends the streamed bubble.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadDom } from './dom.mjs';
@@ -45,4 +46,24 @@ test('stream chunks merge per speaker until endTurn', async () => {
   assert.ok(g3 !== g2);
   assert.deepEqual([...root.querySelectorAll('.entry-body')].map((e) => e.textContent), ['Hello', 'Hi', 'Again', 'x', 'after status']);
   assert.deepEqual([...root.children].map((e) => e.className), ['entry entry-you', 'entry entry-gemini', 'entry entry-gemini', 'entry entry-status', 'entry entry-gemini']);
+});
+
+test('divider renders text inertly and ends the streamed bubble', async () => {
+  const { document, createTranscript } = await loadDom('transcript.js');
+  const root = document.createElement('div');
+  const tr = createTranscript(root);
+  for (const p of HOSTILE) {
+    const node = tr.divider(p);
+    assert.equal(node.textContent, p);
+    assert.equal(node.className, 'divider');
+  }
+  assert.equal(root.querySelectorAll('img,script,svg').length, 0);
+
+  tr.appendStream('gemini', 'a');
+  const d = tr.divider('x');
+  tr.appendStream('gemini', 'b');
+  const gemini = [...root.querySelectorAll('.entry-gemini')];
+  assert.deepEqual(gemini.map((e) => e.querySelector('.entry-body').textContent), ['a', 'b']);
+  const kids = [...root.children];
+  assert.ok(kids.indexOf(gemini[0]) < kids.indexOf(d) && kids.indexOf(d) < kids.indexOf(gemini[1]));
 });

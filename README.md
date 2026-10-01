@@ -6,7 +6,7 @@ It is a code-conductor plugin: the host starts its backend and shows its page un
 
 ## What it does
 
-- **Talk to Gemini Live** with one of the pinned models (below), with a live transcript of what you said, what Gemini said, and every tool call and result.
+- **Talk to Gemini Live** with one of the pinned models (below), with a live transcript of what you said, what Gemini said, and every tool call and result. Each new session starts with a `New session started · <time>` divider (not on an automatic resume); earlier sessions stay above it.
 - **Drive several conductors by voice.** Gemini lists, creates, prompts and reads conductor sessions, naming the conductor in every action. Worker sessions are never listed, read or prompted.
 - **Hear replies as they finish.** When a conductor code-live has acted on ends a turn, its last text reply is announced with the conductor's title and session id: shown in the transcript and, while connected, spoken by Gemini (long or code-heavy replies are summarized).
 - **Answer and approve by voice.** When the conductor stops on a question or a plan, Gemini reads the questions with their numbered options, or the plan, and you answer, approve or reject by speaking. Approval needs a spoken yes. Only your voice counts: Gemini creates, prompts, answers or decides for a conductor only when you ask aloud, never from what a conductor writes.

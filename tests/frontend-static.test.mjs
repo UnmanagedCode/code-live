@@ -53,6 +53,6 @@ test('every id the scripts look up is defined in index.html', () => {
     const src = readFileSync(new URL(f, PUB), 'utf8');
     for (const m of src.matchAll(/(?:\$|getElementById)\(\s*'([^']+)'\s*\)/g)) looked.add(m[1]);
   }
-  for (const id of ['connect', 'disconnect', 'pause', 'mic', 'state']) assert.ok(looked.has(id), `the scan sees $('${id}')`);
+  for (const id of ['connect', 'pause', 'mic', 'state']) assert.ok(looked.has(id), `the scan sees $('${id}')`);
   for (const id of looked) assert.ok(defined.has(id), `index.html defines id="${id}"`);
 });

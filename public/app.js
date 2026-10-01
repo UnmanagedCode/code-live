@@ -9,6 +9,7 @@ import { createEventStream } from './events.js';
 import { createPlayer } from './player.js';
 import { createSessionView } from './sessionView.js';
 import { installMicControl } from './micControl.js';
+import { installConnectControl } from './connectControl.js';
 import { createChunker, downsample, floatToPcm16, pcm16ToBase64 } from './audio.js';
 import { el } from './dom.js';
 
@@ -35,18 +36,18 @@ const view = createSessionView({
   player: { enqueue: (b64) => player?.enqueue(b64), flush: () => player?.flush() },
 });
 const session = createLiveSession({ api, onEvent });
-// onEvent only fires after a user action, so it can reference micControl.
+// onEvent only fires after a user action, so it can reference micControl and connectControl.
 const micControl = installMicControl({ button: $('pause'), indicator: $('mic'), session });
+const connectControl = installConnectControl({ button: $('connect'), session, connect: startSession });
 
 function onEvent(ev) {
   if (ev.type === 'mic') { micControl.render(); return; }
-  if (ev.type !== 'state') { view.handle(ev); return; }
+  view.handle(ev);
+  if (ev.type !== 'state') return;
   $('state').textContent = ev.state;
   $('state').dataset.state = ev.state;
   micControl.render();
-  // Disconnect stays enabled while connecting/reconnecting so a stuck attempt can be abandoned.
-  $('connect').disabled = !(ev.state === 'idle' || ev.state === 'error');
-  $('disconnect').disabled = ev.state === 'idle' || ev.state === 'error';
+  connectControl.render();
   if (ev.detail) transcript.add(ev.state === 'error' ? 'error' : 'status', ev.detail);
   if (ev.state === 'live' && !mic) startMic();
   if (ev.state === 'idle' || ev.state === 'error') stopMic();
@@ -100,13 +101,12 @@ function stopMic() {
   player?.flush();
 }
 
-$('connect').addEventListener('click', async () => {
-  // The AudioContext must be created from a user gesture.
+// The AudioContext must be created from a user gesture.
+async function startSession() {
   if (!audioCtx) { audioCtx = new AudioContext(); player = createPlayer(audioCtx); }
   await audioCtx.resume();
   session.connect($('model').value);
-});
-$('disconnect').addEventListener('click', () => session.disconnect());
+}
 
 api.getModels()
   .then(({ models }) => $('model').replaceChildren(...models.map((m) => el('option', { value: m.id }, m.hint ? `${m.label} (${m.hint})` : m.label))))
