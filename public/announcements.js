@@ -8,16 +8,18 @@ export const ASK_PLAN_MARK = 'AWAITING PLAN APPROVAL';
 // inside an update whose header and footer name the session to act on, so none
 // of it may pose as either. Everything interpolated stays on one line (a title
 // also loses its quotes); in a reply, a line that would read as a header or
-// footer once invisible characters are dropped, Unicode spaces are plain spaces
-// and case is ignored is prefixed with "> ". Every Unicode line separator
-// starts a line.
-const BREAKS = '\\n\\r\\v\\f\\u0085\\u2028\\u2029';
+// footer once invisible characters and combining marks are dropped, Unicode
+// spaces are plain spaces and case is ignored is prefixed with "> ". Every
+// Unicode line separator, and the FS/GS/RS controls, starts a line. Look-alike
+// letters and markdown-decorated markers are not caught.
+const BREAKS = '\\n\\r\\v\\f\\u001c-\\u001e\\u0085\\u2028\\u2029';
 const oneLine = (s) => String(s).replace(new RegExp(`[${BREAKS}]+`, 'g'), ' ');
 const safeTitle = (title) => oneLine(title).replaceAll('"', "'");
 const BREAK_SPLIT = new RegExp(`(\\r\\n|[${BREAKS}])`);
 const INVISIBLE = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
-const MARKER = new RegExp(`^ *(?:${ANNOUNCE_PREFIX.replaceAll(' ', ' +')}|AWAITING(?= ))`, 'i');
-const readsAsMarker = (line) => MARKER.test(line.replace(INVISIBLE, '').replace(/\s/gu, ' '));
+const MARKER = new RegExp(`^ *(?:${ANNOUNCE_PREFIX.replaceAll(' ', ' +')}|AWAITING(?![A-Za-z0-9]))`, 'i');
+const COMBINING = /\p{Mn}/gu;
+const readsAsMarker = (line) => MARKER.test(line.normalize('NFKD').replace(COMBINING, '').replace(INVISIBLE, '').replace(/\s/gu, ' '));
 // split() with a capture group alternates lines and the breaks between them.
 const safeBody = (text) => String(text).split(BREAK_SPLIT).map((part, i) => (i % 2 === 0 && readsAsMarker(part) ? `> ${part}` : part)).join('');
 
