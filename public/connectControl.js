@@ -7,7 +7,8 @@ export function installConnectControl({ button, session, connect }) {
     const connecting = session.state === 'connecting';
     button.textContent = connected() ? 'Disconnect' : connecting ? 'Connecting...' : 'Connect';
     button.dataset.state = session.state;
-    // A connect attempt is bounded (token mint and setup time out), so it is not cancellable.
+    // A connect attempt ends by itself (the token request and the Gemini setup are each
+    // time-bounded, see TOKEN_TIMEOUT_MS in api.js), so it is not cancellable.
     button.disabled = connecting;
     button.setAttribute('aria-busy', String(connecting));
   }

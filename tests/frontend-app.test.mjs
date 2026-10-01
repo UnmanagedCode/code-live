@@ -50,7 +50,11 @@ function deferred(fallback) {
 function stubBrowser(baseUrl) {
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (u, o) => {
-    if (u === 'api/token' && tokenGate) await tokenGate;
+    if (u === 'api/token' && tokenGate) {
+      // A real fetch rejects when its signal aborts.
+      const aborted = new Promise((_, reject) => o?.signal?.addEventListener('abort', () => reject(o.signal.reason)));
+      await Promise.race([tokenGate, aborted]);
+    }
     return realFetch(new URL(u, baseUrl + '/'), o);
   };
   globalThis.EventSource = class { addEventListener() {} };
@@ -493,4 +497,21 @@ test('a reconnect keeps earlier messages and adds exactly one divider after them
   const divider = [...dividers()].at(-1);
   assert.ok(entry.compareDocumentPosition(divider) & 4 /* Node.DOCUMENT_POSITION_FOLLOWING */);
   assert.match(divider.textContent, /^New session started · /);
+});
+
+test('a token request that never answers returns the button to Connect', async (t) => {
+  // Pins: the page bounds its token request, so a stalled POST api/token ends the
+  // attempt in `error` with an enabled Connect button instead of a stuck Connecting...
+  // The page's timeout is shortened by wrapping AbortSignal.timeout.
+  const realTimeout = AbortSignal.timeout;
+  AbortSignal.timeout = () => realTimeout.call(AbortSignal, 20);
+  t.after(() => { AbortSignal.timeout = realTimeout; });
+  holdTokenMint();
+  $('connect').click();
+  await waitFor(() => $('connect').textContent === 'Connecting...', { what: 'Connecting...' });
+
+  await waitFor(() => $('state').textContent === 'error', { what: 'state error' });
+  assert.equal($('connect').textContent, 'Connect');
+  assert.equal($('connect').disabled, false);
+  assert.ok(transcriptHas('No response from the backend within'));
 });

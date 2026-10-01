@@ -48,7 +48,7 @@ browser (Code Live page)                       code-live backend (node:http)    
 | `public/connectControl.js` | the single Connect / Connecting... / Disconnect button, rendered from `session.state`; disabled while `connecting` |
 | `public/micControl.js` | Pause/Resume mic button and `Mic paused` pill, rendered from `session.state` + `session.micPaused` |
 | `public/sessionView.js` | session events → transcript and speaker; `isReplyEnd` (a `turnComplete` with `interactionStatus: IN_PROGRESS` doesn't end the bubble); the new-session divider on `connecting → live` (injectable `now`) |
-| `public/api.js` | backend client (relative URLs, `cache:'no-store'`) |
+| `public/api.js` | backend client (relative URLs, `cache:'no-store'`); the token request alone carries a timeout (`TOKEN_TIMEOUT_MS`, injectable as `tokenTimeoutMs`), after which it rejects with `No response from the backend within <n> s` |
 | `public/styles.css` | the page's only stylesheet, dark-only. Its `:root` tokens are copied from the `:root` block of code-conductor's shell `public/styles.css`, because the host provides no theme to the plugin iframe |
 | `public/transcript.js` | transcript rendering, merging streamed transcription chunks, `divider(text)` |
 | `public/settings.js` | the Settings pane |

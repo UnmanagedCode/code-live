@@ -37,6 +37,17 @@ test('connect mints a token, sends an empty setup and goes live', async (t) => {
   assert.equal(mints(gemini)[0].body.bidiGenerateContentSetup.model, 'models/gemini-3.1-flash-live-preview');
 });
 
+test('a token request that never answers ends the attempt in error', async (t) => {
+  // Pins: the browser's token request is time-bounded, so a connect that is stuck on
+  // an unanswered POST api/token ends in `error` instead of staying `connecting`.
+  const hang = (u, o) => new Promise((_, reject) => o.signal.addEventListener('abort', () => reject(o.signal.reason)));
+  const { events, session } = await setup(t, { mintToken: createApi(hang, { tokenTimeoutMs: 20 }).mintToken });
+  await session.connect('gemini-3.8-live');
+  assert.equal(session.state, 'error');
+  assert.deepEqual(states(events), ['connecting', 'error']);
+  assert.match(events.at(-1).detail, /^No response from the backend within /);
+});
+
 test('binary server frames become events; empty messages are ignored', async (t) => {
   const { gemini, events, session } = await setup(t);
   await session.connect('gemini-3.8-live');
