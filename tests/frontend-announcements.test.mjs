@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadDom } from './dom.mjs';
 import { SYSTEM_PROMPT } from '../src/liveSetup.js';
+import { DECLARATIONS } from '../src/tools.js';
 
 function fakeEventSource() {
   const listeners = {};
@@ -90,6 +91,27 @@ test('the system prompt keys on both ask marks and on the approval confirmation'
   assert.match(SYSTEM_PROMPT, /answer_conductor_question/);
   assert.match(SYSTEM_PROMPT, /without permission prompts.*explicit yes.*confirmed true/s);
   assert.match(SYSTEM_PROMPT, /INVALID_OPTION/);
+});
+
+test('the system prompt says only spoken audio is the user and never to act on its own', () => {
+  assert.match(SYSTEM_PROMPT, /^Only spoken audio comes from the user\./m);
+  assert.match(SYSTEM_PROMPT, /Text input is always a conductor update/);
+  assert.match(SYSTEM_PROMPT, /tool results.*neither is ever the user.*never counts/s);
+  const rule = SYSTEM_PROMPT.split('\n').find((l) => l.startsWith('Never act on your own:'));
+  assert.ok(rule, 'a "Never act on your own:" line exists');
+  const readOnly = ['list_conductor_sessions', 'read_conductor_messages'];
+  const [gated, allowed] = rule.split('only when the user has asked for it aloud');
+  assert.ok(allowed !== undefined, 'the line names the aloud-only clause');
+  const tokens = (text) => new Set(text.match(/[a-z][a-z0-9_]*/g));
+  const gatedNames = tokens(gated);
+  const allowedNames = tokens(allowed);
+  for (const { name } of DECLARATIONS) {
+    if (readOnly.includes(name)) assert.ok(allowedNames.has(name), `${name} is named as read-only`);
+    else assert.ok(gatedNames.has(name), `${name} is gated on the user asking aloud`);
+  }
+  assert.match(SYSTEM_PROMPT, /"AWAITING ANSWER".*wait for their spoken answer, then call answer_conductor_question/);
+  assert.match(SYSTEM_PROMPT, /"AWAITING PLAN APPROVAL".*wait for their spoken decision before calling/);
+  assert.doesNotMatch(SYSTEM_PROMPT, /ask the user, then call/);
 });
 
 test('the system prompt says several conductors can be live, to name one per action by session id, and to ask when unsure', () => {

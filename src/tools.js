@@ -43,7 +43,7 @@ export const DECLARATIONS = [
   },
   {
     name: 'answer_conductor_question',
-    description: "Answer the question(s) the named conductor is waiting on, after the user has told you their answer. `answers` holds one entry per question, in order: entry 1 answers question 1. An entry's `choices` are the chosen options, each as the option's number or its words (one for a single-choice question, several allowed for a multi-select one); `text` is a free-text answer instead of an option; `note` adds a remark to a choice. Leave an entry empty to skip that question.",
+    description: "Answer the question(s) the named conductor is waiting on, after the user has spoken their answer. `answers` holds one entry per question, in order: entry 1 answers question 1. An entry's `choices` are the chosen options, each as the option's number or its words (one for a single-choice question, several allowed for a multi-select one); `text` is a free-text answer instead of an option; `note` adds a remark to a choice. Leave an entry empty to skip that question.",
     parameters: {
       type: 'OBJECT',
       properties: {
