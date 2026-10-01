@@ -7,19 +7,20 @@ User-facing behavior of the Code Live page and its voice tools. Wire shapes are 
 | region | contents |
 |---|---|
 | status bar | session state pill (`idle`, `connecting`, `live`, `reconnecting`, `error`) the `Mic paused` pill (shown only while the mic is paused), and the host indicator (`Host connected` / `Host disconnected`: the backend's link to code-conductor's `/ws`) |
-| controls | **Model** select (the pinned models from `GET api/models`; a model with a `hint` shows it after the label, e.g. `Gemini 3.8 Live Extended Thinking (tool calls usually fail)`), **Connect**, **Pause mic** / **Resume mic**, **Disconnect** |
-| transcript | You / Gemini transcription bubbles, tool calls and results as JSON, conductor announcements, status and error lines |
+| controls | **Model** select (the pinned models from `GET api/models`; a model with a `hint` shows it after the label, e.g. `Gemini 3.8 Live Extended Thinking (tool calls usually fail)`), **Connect** (one button: `Connect`, `Connecting...` while connecting, a red `Disconnect` while `live` or `reconnecting`), **Pause mic** / **Resume mic** |
+| transcript | You / Gemini transcription bubbles, tool calls and results as JSON, conductor announcements, status and error lines, and a `New session started · <time>` divider at the start of each session (not on a resume) |
 | Settings (collapsible) | Gemini API key: password field, **Save**, **Clear**, and the status `Key set (••••<last 4>)` or `No key set` |
 
 The page is dark-only and uses code-conductor's shell colours, whatever the OS colour scheme.
 
 ## Connecting
 
-- **Connect** creates the audio context (it needs a user gesture), mints a token for the selected model, and opens the Gemini Live socket. When the session is `live`, the microphone starts: echo cancellation and noise suppression on, mono, sent as 16 kHz PCM in ~100 ms chunks.
+- **Connect** creates the audio context (it needs a user gesture), mints a token for the selected model, and opens the Gemini Live socket. While connecting, the button reads `Connecting...` and is disabled (`aria-busy`); the attempt ends by itself, because the token mint and the setup are each bounded at 15 s. When the session is `live`, the microphone starts: echo cancellation and noise suppression on, mono, sent as 16 kHz PCM in ~100 ms chunks.
 - Each Gemini reply is one transcript bubble. An extended-thinking model reports a turn end with `interactionStatus: IN_PROGRESS` while it keeps working on the same reply (for example around a tool call); that keeps the bubble open. Any other status, or none, closes it.
 - Gemini's audio plays back gaplessly. When Gemini reports it was **interrupted** (you talked over it), queued audio is dropped.
 - If Gemini accepts the socket but doesn't finish the handshake (`setupComplete`) within 15 s, the attempt is abandoned: Connect ends in `error` with `Gemini did not complete setup within 15 s`, and a stalled resume counts as one failed attempt.
-- **Disconnect** closes the session, stops the microphone and returns to `idle`. It is enabled while `connecting` and `reconnecting` too, and abandons the attempt in progress.
+- The same button, reading **Disconnect**, closes the session, stops the microphone and returns to `idle`; while `reconnecting` it abandons the resume. A fresh connect cannot be abandoned.
+- An `error` or a Gemini-side close returns the button to **Connect**. Earlier messages stay in the transcript, and the next session that goes `live` adds a new divider.
 - When Gemini announces a connection end (`goAway`, about every 10 minutes) or the socket drops unexpectedly, the page shows `reconnecting` and resumes the same conversation on a fresh token. Attempts are spaced out (`resumeDelayMs` doubling: 1, 2, 4, 8 s) so a resume that meets a restarting backend still gets through; after `maxResumeFailures` (5) failed attempts in a row, or with no resumption handle yet, it goes to `error`; press **Connect** to start over.
 - Without a stored key, Connect fails with `No Gemini API key is set; add one in Settings`.
 

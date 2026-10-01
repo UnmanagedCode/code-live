@@ -54,5 +54,14 @@ export function createTranscript(root) {
     },
 
     endTurn() { stream = null; },
+
+    // A full-width line marking a new session; the next chunk starts a new bubble below it.
+    divider(text) {
+      stream = null;
+      const node = el('div', { class: 'divider' }, text);
+      root.append(node);
+      scroll();
+      return node;
+    },
   };
 }

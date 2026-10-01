@@ -45,11 +45,12 @@ browser (Code Live page)                       code-live backend (node:http)    
 |---|---|
 | `public/app.js` | wiring only: builds the modules, connects the buttons, reflects session state, runs the mic (AudioWorklet → 100 ms chunks → 16 kHz PCM16 base64, frames discarded while the mic is paused) and playback |
 | `public/liveSession.js` | DOM-free Gemini Live client: states, message → event mapping, tool round-trip, cancellation, reconnect (`reconnect()`), the mic pause flag (`pauseMic`/`resumeMic`/`micPaused`, kept across `live ⇄ reconnecting`, cleared on any other state), the bounded `setupComplete` wait (`setupTimeoutMs`, injectable `timers`), the spacing of resume attempts (`resumeDelayMs`, doubling, up to `maxResumeFailures`; a Disconnect during the wait ends the loop), and `disconnect()` from any state |
+| `public/connectControl.js` | the single Connect / Connecting... / Disconnect button, rendered from `session.state`; disabled while `connecting` |
 | `public/micControl.js` | Pause/Resume mic button and `Mic paused` pill, rendered from `session.state` + `session.micPaused` |
-| `public/sessionView.js` | session events → transcript and speaker; `isReplyEnd` (a `turnComplete` with `interactionStatus: IN_PROGRESS` doesn't end the bubble) |
+| `public/sessionView.js` | session events → transcript and speaker; `isReplyEnd` (a `turnComplete` with `interactionStatus: IN_PROGRESS` doesn't end the bubble); the new-session divider on `connecting → live` (injectable `now`) |
 | `public/api.js` | backend client (relative URLs, `cache:'no-store'`) |
 | `public/styles.css` | the page's only stylesheet, dark-only. Its `:root` tokens are copied from the `:root` block of code-conductor's shell `public/styles.css`, because the host provides no theme to the plugin iframe |
-| `public/transcript.js` | transcript rendering, merging streamed transcription chunks |
+| `public/transcript.js` | transcript rendering, merging streamed transcription chunks, `divider(text)` |
 | `public/settings.js` | the Settings pane |
 | `public/events.js` | `createEventStream`: an EventSource wrapper for `api/events` (same `addEventListener` surface). A native source stops for good when a reconnect gets a non-2xx reply, so on an `error` with `readyState` CLOSED it creates a new source after `retryMs` (doubling to `maxRetryMs`, reset on `open`; injectable `timers`), re-attaches every registered listener and passes the last non-empty event id as `?lastEventId=`. An `error` while CONNECTING is left to the native retry |
 | `public/announcements.js` | SSE → transcript and `sendText`; `ANNOUNCE_PREFIX`, `ASK_QUESTION_MARK`, `ASK_PLAN_MARK` and the footer line for an `ask`. Conductor-written title, text and plan path are made inert before they enter the injected header, body or footer (see [protocol](protocol.md#live-socket); look-alike letters and markdown-decorated markers are accepted residual risk) |
