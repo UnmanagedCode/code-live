@@ -153,7 +153,7 @@ Run with `npm test`, which is `node tests/run.mjs`: the `node:test` runner drive
 - **Harness:** `tests/helpers.mjs`' `startApp()` builds a real server through `buildDeps` with a fresh temp `PROJECTS_ROOT` and short link timings. It also provides an SSE client and `SENTINEL_KEY`; tests use only that sentinel key.
 - **Frontend:** `tests/dom.mjs` installs happy-dom globals and imports the real `public/` modules.
 - **Waits:** tests wait on observable outcomes (an SSE event, a received frame, a published marker), never on fixed sleeps.
-- **Style guard:** `tests/frontend-styles.test.mjs` reads `public/styles.css` as text and checks it has no `prefers-color-scheme` query, declares `color-scheme: dark` and the host's token names on `:root`, and uses no `var(--…)` that `:root` doesn't declare.
+- **Style guard:** `tests/frontend-styles.test.mjs` reads `public/styles.css` as text and checks it has no `prefers-color-scheme` query, declares `color-scheme: dark` and the host's token names on `:root`, uses no `var(--…)` that `:root` doesn't declare, and pins code-conductor's disabled-button rendering: the `button:disabled` fade and the `button:not(.secondary):disabled` swap, copied from the host's generic `button:disabled` and primary-button `:disabled` rules.
 - **Coverage guard:** `tests/nondisclosure.test.mjs` compares its probe list against `ROUTES`, so a new route fails until it is checked for key leaks.
 - **Real smoke tests:**
   - `tests/real-gemini.test.mjs` is skipped unless `RUN_REAL_GEMINI=1`, and reads the key from `GEMINI_API_KEY`. Models in its `CONNECT_ONLY` set skip the tool-call step (see the README's known limitations).
