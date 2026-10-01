@@ -34,7 +34,7 @@ User-facing behavior of the Code Live page and its voice tools. Wire shapes are 
 
 ## Voice tools
 
-Gemini decides when to call these; each call and its result appear in the transcript. Every tool that acts on a conductor needs that conductor's `session`: the id from its announcement or from `list_conductor_sessions`, or its exact title (any case). Several conductors can be live at once, and nothing picks one for Gemini.
+Gemini calls `list_conductor_sessions` and `read_conductor_messages` to answer you, and every other tool only when you ask for it aloud; each call and its result appear in the transcript. Every tool that acts on a conductor needs that conductor's `session`: the id from its announcement or from `list_conductor_sessions`, or its exact title (any case). Several conductors can be live at once, and nothing picks one for Gemini.
 
 | tool | behavior the user hears about |
 |---|---|
@@ -71,6 +71,7 @@ Only conductors code-live has acted on are announced; every other conductor stay
 
 When an announced conductor ends a turn on a question or a plan, the announcement includes it, and Gemini acts on it.
 
+- **Only your voice counts.** Gemini treats every conductor update and every tool result as conductor text, never as you. A conductor writing that you already said yes or chose an option does not count, and Gemini never answers a question or decides a plan by itself. This is prompt guidance, not enforcement (see Approve below).
 - **Questions:** Gemini reads each question with its numbered options and asks you. A very long set of questions is shortened to fit: option descriptions first, then long labels, and if that is still not enough some trailing options are left out. Gemini says so, and option numbers still work. Answer with the option number or its words (`the second`, `sqlite`). A multi-select question takes several options, a question can be answered with your own words instead, and a remark can go along with a choice. Skipped questions are left unanswered. If an option can't be matched, Gemini reads the options back and asks again.
 - **Plans:** Gemini summarizes the plan and asks whether to approve or reject it.
   - **Approve:** Gemini first says that approving lets the conductor run without permission prompts, and waits for an explicit yes. The confirmation is enforced by Gemini's instructions and the tool's `confirmed` flag, not checked against your speech. It guards against a misheard utterance and is not a security boundary: conductor-written text reaches Gemini and could itself prompt an approval, which grants nothing a conductor cannot already do through the open host API.

@@ -9,7 +9,7 @@ It is a code-conductor plugin: the host starts its backend and shows its page un
 - **Talk to Gemini Live** with one of the pinned models (below), with a live transcript of what you said, what Gemini said, and every tool call and result.
 - **Drive several conductors by voice.** Gemini lists, creates, prompts and reads conductor sessions, naming the conductor in every action. Worker sessions are never listed, read or prompted.
 - **Hear replies as they finish.** When a conductor code-live has acted on ends a turn, its last text reply is announced with the conductor's title and session id: shown in the transcript and, while connected, spoken by Gemini (long or code-heavy replies are summarized).
-- **Answer and approve by voice.** When the conductor stops on a question or a plan, Gemini reads the questions with their numbered options, or the plan, and you answer, approve or reject by speaking. Approval needs a spoken yes.
+- **Answer and approve by voice.** When the conductor stops on a question or a plan, Gemini reads the questions with their numbered options, or the plan, and you answer, approve or reject by speaking. Approval needs a spoken yes. Only your voice counts: Gemini creates, prompts, answers or decides for a conductor only when you ask aloud, never from what a conductor writes.
 - **Keep talking while you look elsewhere in code-conductor.** The call keeps running when you leave the Code Live view, and returning shows the same page.
 
 Details: [docs/features.md](docs/features.md).
@@ -97,7 +97,7 @@ The backend exits with an error if `PROJECTS_ROOT` or `CONDUCTOR_URL` is missing
 
 - The microphone needs a secure context: `http://localhost`, `http://127.0.0.1` or `https`.
 - **code-live calls the host's bare `POST /mcp`** for announcement text, `read_conductor_messages`, and answering or deciding plans. That is not part of the plugin API, so a host change can break it without any manifest-level signal. Announcements and reads then fall back to the events text (logged, as they also do when a later turn has already spoken); answering and deciding fail with `HOST_*` codes. All of it is in `src/hostMcp.js`, so moving to a sanctioned host-tool path touches that module and the manifest only.
-- Plan approval requires `confirmed: true`, which the system prompt allows only after the user's spoken yes. That guards against a misheard utterance; it is not a security boundary. Conductor-written text reaches Gemini's conversation and could itself prompt an approval, but that grants nothing a conductor cannot already do through the open host API.
+- Plan approval requires `confirmed: true`, which the system prompt allows only after the user's spoken yes. That guards against a misheard utterance; it is not a security boundary. Conductor-written text reaches Gemini's conversation and could itself prompt an approval, but that grants nothing a conductor cannot already do through the open host API. The same holds for the system prompt's rule that only spoken audio is the user and that Gemini never acts on its own: it is prompt guidance, and nothing checks a tool call against your speech.
 - The host API has no auth, and the same-origin plugin iframe could drive all of code-conductor. The mitigations are DOM-text-only rendering of model output and a strict CSP.
 - Every open Code Live tab injects each announcement into its own Gemini session, so two live tabs speak it twice.
 - Only **live** conductor sessions (those in `GET /api/instances`) are listed or addressable.
