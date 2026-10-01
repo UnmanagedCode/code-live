@@ -62,12 +62,6 @@ test('the stored key never appears in any response', async (t) => {
       await req(u('/api/tools/call'), { method: 'POST', body: { name: 'nope' } }),
       await req(u('/api/tools/call'), { method: 'POST', body: { name: 1 } }),
     ],
-    'GET /api/conductors': () => [req(u('/api/conductors'))],
-    'PUT /api/target': async () => [
-      await req(u('/api/target'), { method: 'PUT', body: { sessionId: 'cond-a' } }),
-      await req(u('/api/target'), { method: 'PUT', body: { sessionId: 'worker-1' } }),
-      await req(u('/api/target'), { method: 'PUT', body: { sessionId: null } }),
-    ],
     'GET /api/events': async () => [await firstSseChunk(u('/api/events'))],
   };
   assert.deepEqual(Object.keys(probes).sort(), ROUTES.map((r) => `${r.method} ${r.path}`).sort(), 'every route is probed');

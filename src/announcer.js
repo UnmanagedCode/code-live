@@ -1,10 +1,13 @@
-// Detects finished turns on the active conductor and publishes them as SSE
-// `announce` events. Idempotent by the turn_end's _seq together with the turn's
-// last assistant msgId: every trigger (a turn_notification, a host /ws
-// reconnect, backend startup, an instances frame showing a pending question or
-// plan) runs the same serialized reconcile over the REST events route, so a
-// duplicate or missed notification never double-announces or drops a turn, and
-// a host that replays its history under fresh _seq numbers stays silent.
+// Detects finished turns on the announced conductors (the ones this backend
+// has acted on, see `watch`) and publishes them as SSE `announce` events.
+// Idempotent by the turn_end's _seq together with the turn's last assistant
+// msgId: every trigger (a turn_notification, a host /ws reconnect, backend
+// startup, an instances frame showing a pending question or plan) runs the same
+// serialized reconcile over the REST events route, so a duplicate or missed
+// notification never double-announces or drops a turn, and a host that replays
+// its history under fresh _seq numbers stays silent. Each conductor keeps its
+// own cursor; a conductor leaves the set only when a reconcile finds it gone
+// from the host's list, no longer a conductor, or its events route 404ing.
 //
 // A pending question or plan is announced once, keyed by its tool_use id, even
 // when later turns have already ended: the instance row says whether an ask is
@@ -42,20 +45,38 @@ function askKey(row) {
 export function createAnnouncer({ api, link, state, publish, hostMcp }) {
   let chain = Promise.resolve();
   let askQueued = false;
-  // The ask state the last completed reconcile settled, so an unchanged state
-  // is not probed again; `done` is false while the ask's turn is still running.
-  let probed = { key: null, done: false };
-  // Target switches and reconciles share one queue, so a reconcile for the old
-  // target can never write its seq over a fresh baseline.
+  // Per conductor, the ask state the last completed reconcile settled, so an
+  // unchanged state is not probed again; `done` is false while the ask's turn
+  // is still running.
+  const probed = new Map();
+  // Watches, prunes and reconciles for every conductor share one queue, so a
+  // reconcile can never write its seq over a fresh baseline and turns that
+  // finish together are announced one after the other.
   function serialize(fn) {
     const run = chain.then(fn);
     chain = run.catch(() => {});
     return run;
   }
 
-  async function dropTarget() {
-    await state.update({ activeTargetId: null });
-    publish('target', null);
+  const watchedIds = () => Object.keys(state.get().watched);
+  const cursorOf = (id) => {
+    const { watched } = state.get();
+    return Object.hasOwn(watched, id) ? watched[id] : null;
+  };
+
+  // Read-modify-write of one cursor; a conductor pruned meanwhile is not revived.
+  async function patchCursor(id, patch) {
+    const { watched } = state.get();
+    if (!Object.hasOwn(watched, id)) return;
+    await state.update({ watched: { ...watched, [id]: { ...watched[id], ...patch } } });
+  }
+
+  async function unwatch(id) {
+    probed.delete(id);
+    const { watched } = state.get();
+    if (!Object.hasOwn(watched, id)) return;
+    const { [id]: _gone, ...rest } = watched;
+    await state.update({ watched: rest });
   }
 
   // get_recent_messages when it ends on this turn, else null (logged). It
@@ -112,28 +133,26 @@ export function createAnnouncer({ api, link, state, publish, hostMcp }) {
   }
 
   // `askOnly` announces only a pending ask (with its turn, when that is the
-  // newest) and otherwise leaves state untouched.
-  async function doReconcile({ askOnly = false, row: known } = {}) {
-    const st = state.get();
-    const id = st.activeTargetId;
-    if (!id) return;
-    let row = known;
-    if (!row) {
-      try {
-        row = (await api.listInstances()).find((i) => i.id === id);
-      } catch (e) {
-        console.error('code-live: reconcile failed:', e.message);
-        return;
-      }
+  // newest) and otherwise leaves the cursor untouched. `rows` is an instance
+  // list the caller has just read; omitted, it is read here.
+  async function doReconcile(id, { askOnly = false, rows } = {}) {
+    const st = cursorOf(id);
+    if (!st) return;
+    let row;
+    try {
+      row = (rows ?? await api.listInstances()).find((i) => i.id === id);
+    } catch (e) {
+      console.error('code-live: reconcile failed:', e.message);
+      return;
     }
     // Only a live conductor is ever announced; a persisted id that is gone or
-    // names a worker is cleared.
-    if (!isConductor(row)) { await dropTarget(); return; }
+    // names a worker is pruned.
+    if (!isConductor(row)) { await unwatch(id); return; }
     let data;
     try {
       data = await api.getEvents(id);
     } catch (e) {
-      if (e.code === 'SESSION_GONE') { await dropTarget(); return; }
+      if (e.code === 'SESSION_GONE') { await unwatch(id); return; }
       console.error('code-live: reconcile failed:', e.message);
       return;
     }
@@ -155,7 +174,7 @@ export function createAnnouncer({ api, link, state, publish, hostMcp }) {
       msgId = lastAssistantMsgId(events, turnEnd._seq);
       if (msgId !== null && msgId === st.lastHandledMsgId) {
         // The turn already announced, replayed under a new _seq.
-        await state.update({ lastHandledTurnSeq: turnEnd._seq });
+        await patchCursor(id, { lastHandledTurnSeq: turnEnd._seq });
       } else {
         announceTurn = !askOnly || (!!pending && pending.end._seq === turnEnd._seq);
       }
@@ -166,80 +185,115 @@ export function createAnnouncer({ api, link, state, publish, hostMcp }) {
     // before the later turn.
     if (pending && !combined) {
       const content = await compose({ row, events, turnEnd: pending.end, msgId: null, pending, useMcp: false });
-      await state.update({ lastHandledAskId: pending.id });
+      await patchCursor(id, { lastHandledAskId: pending.id });
       emit(id, row, pending.end, content);
     }
     if (announceTurn) {
       const content = await compose({ row, events, turnEnd, msgId, pending: combined ? pending : null, useMcp: true });
-      await state.update({ lastHandledTurnSeq: turnEnd._seq, lastHandledMsgId: msgId, ...(combined ? { lastHandledAskId: pending.id } : {}) });
+      await patchCursor(id, { lastHandledTurnSeq: turnEnd._seq, lastHandledMsgId: msgId, ...(combined ? { lastHandledAskId: pending.id } : {}) });
       emit(id, row, turnEnd, content);
     }
     // Settled unless the ask's own turn is still running.
-    probed = { key: askKey(row), done: !kind || !askEv || !!askEnd };
+    probed.set(id, { key: askKey(row), done: !kind || !askEv || !!askEnd });
+  }
+
+  // Runs `fn` for each id; one conductor's failure does not starve the rest,
+  // and the first is rethrown once all have run.
+  async function eachWatched(ids, fn) {
+    let failure;
+    for (const id of ids) {
+      try { await fn(id); } catch (e) { failure ??= e; }
+    }
+    if (failure) throw failure;
   }
 
   const announcer = {
-    reconcile: () => serialize(doReconcile),
+    // One conductor, or (without `id`) every announced one from a single list read.
+    reconcile: (id) => serialize(async () => {
+      if (id !== undefined) { await doReconcile(id); return; }
+      const ids = watchedIds();
+      if (ids.length === 0) return;
+      let rows;
+      try {
+        rows = await api.listInstances();
+      } catch (e) {
+        console.error('code-live: reconcile failed:', e.message);
+        return;
+      }
+      await eachWatched(ids, (one) => doReconcile(one, { rows }));
+    }),
 
     // For triggers that have nobody to hand a rejection to: a failure is
     // logged, never left unhandled.
-    reconcileLogged({ ask = false } = {}) {
-      return (ask ? announcer.reconcileAsk() : announcer.reconcile()).catch(logFailure);
+    reconcileLogged({ ask = false, id } = {}) {
+      return (ask ? announcer.reconcileAsk() : announcer.reconcile(id)).catch(logFailure);
     },
 
     // Reconciles for a pending question or plan the host may not have sent a
-    // turn_notification for. Coalesced, and skipped once the row's ask state
-    // has been settled by a completed reconcile.
+    // turn_notification for. Coalesced, and skipped per conductor once its row's
+    // ask state has been settled by a completed reconcile. It also prunes a
+    // conductor that has left the host's list.
     reconcileAsk() {
       if (askQueued) return chain;
       askQueued = true;
       return serialize(async () => {
         askQueued = false;
-        const id = state.get().activeTargetId;
-        if (!id) return;
-        let row;
+        const ids = watchedIds();
+        if (ids.length === 0) return;
+        let rows;
         try {
-          row = (await api.listInstances()).find((i) => i.id === id);
+          rows = await api.listInstances();
         } catch (e) {
           console.error('code-live: reconcile failed:', e.message);
           return;
         }
-        const key = askKey(row);
-        if (key === null || (probed.done && key === probed.key)) return;
-        await doReconcile({ askOnly: true, row });
+        await eachWatched(ids, async (id) => {
+          if (!cursorOf(id)) return;
+          const row = rows.find((i) => i.id === id);
+          if (!isConductor(row)) { await unwatch(id); return; }
+          const key = askKey(row);
+          const last = probed.get(id);
+          if (key === null || (last?.done && key === last.key)) return;
+          await doReconcile(id, { askOnly: true, rows });
+        });
       });
     },
 
-    // Makes `id` the active target with every turn it has already finished
-    // marked handled. Pass `seq` when it is known (-1 for a fresh session);
-    // otherwise it is read from the events route, and a failure propagates.
-    baseline: (id, seq) => serialize(async () => {
+    // Starts announcing `id` with every turn it has already finished marked
+    // handled; a no-op when it is already announced. Pass `seq` when it is known
+    // (-1 for a fresh session); otherwise it is read from the events route, and
+    // a failure propagates. `ask` ('question' | 'plan') also marks that
+    // conductor's current ask of the kind handled, for a caller about to answer
+    // it; without it, a question or plan the row still shows as unanswered is
+    // news and is announced once.
+    watch: (id, { seq, ask } = {}) => serialize(async () => {
+      if (cursorOf(id)) return false;
       let handled = seq;
       let msgId = null;
-      if (handled === undefined) {
+      let askHandled = null;
+      if (handled === undefined || ask) {
         const data = await api.getEvents(id);
         const events = Array.isArray(data?.events) ? data.events : [];
-        const newest = newestTurnEnd(events, -Infinity);
-        handled = newest ? newest._seq : -1;
-        if (newest) msgId = lastAssistantMsgId(events, newest._seq);
+        if (handled === undefined) {
+          const newest = newestTurnEnd(events, -Infinity);
+          handled = newest ? newest._seq : -1;
+          if (newest) msgId = lastAssistantMsgId(events, newest._seq);
+        }
+        const askEv = ask ? latestAskEvent(events, ask) : null;
+        if (askEv) askHandled = askId(askEv);
       }
-      probed = { key: null, done: false };
-      // Finished turns are not replayed on a switch, but a question or plan the
-      // row still shows as unanswered is news: it is announced once. Re-picking
-      // the current target keeps what it already announced.
-      const st = state.get();
-      const ask = st.activeTargetId === id ? st.lastHandledAskId : null;
-      await state.update({ activeTargetId: id, lastHandledTurnSeq: handled, lastHandledMsgId: msgId, lastHandledAskId: ask });
-    }).then(() => {
-      announcer.reconcileLogged({ ask: true });
+      probed.delete(id);
+      const { watched } = state.get();
+      await state.update({ watched: { ...watched, [id]: { lastHandledTurnSeq: handled, lastHandledMsgId: msgId, lastHandledAskId: askHandled } } });
+      return true;
+    }).then((added) => {
+      if (added) announcer.reconcileLogged({ ask: true });
     }),
-
-    clear: () => serialize(() => state.update({ activeTargetId: null })),
   };
 
   if (link) {
     link.on('turn_notification', (frame) => {
-      if (frame.id && frame.id === state.get().activeTargetId) announcer.reconcileLogged();
+      if (frame.id && cursorOf(frame.id)) announcer.reconcileLogged({ id: frame.id });
     });
     link.on('instances', () => { announcer.reconcileLogged({ ask: true }); });
     link.on('open', () => { announcer.reconcileLogged(); });

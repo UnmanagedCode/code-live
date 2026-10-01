@@ -25,7 +25,7 @@ browser (Code Live page)                       code-live backend (node:http)    
 | `src/config.js` | `loadConfig(env)`: env → config; throws on a missing `PROJECTS_ROOT` / `CONDUCTOR_URL`; derives `dataDir`, `geminiWsUrl` and `hostWsUrl` |
 | `src/atomicFile.js` | `writeFileAtomic` (0600 temp file + rename + chmod, directory 0700) and `readJson` (`null` if absent, `STORE_CORRUPT` if unparseable) |
 | `src/keyStore.js` | `secrets.json`: `get` (the only key accessor, used only by `gemini.js`), `status`, `set` (validation), `clear` |
-| `src/stateStore.js` | `state.json`: `{activeTargetId, lastHandledTurnSeq, lastHandledMsgId, lastHandledAskId}`; writes are serialized, so the file ends at the last `update` |
+| `src/stateStore.js` | `state.json`: `{watched:{<instanceId>:{lastHandledTurnSeq, lastHandledMsgId, lastHandledAskId}}}`; writes are serialized, so the file ends at the last `update` |
 | `src/models.js` | `MODELS`, the pinned catalog with per-model `thinkingLevel` / `toolBehavior` and the optional picker `hint`; `getModel` |
 | `src/tools.js` | `DECLARATIONS` (the single source for the Gemini setup and the dispatcher), `toolDeclarations(model)`, and `callTool` (validation + dispatch; never throws) |
 | `src/liveSetup.js` | `SYSTEM_PROMPT`, `buildSetup(modelId, resumeHandle)` |
@@ -35,8 +35,8 @@ browser (Code Live page)                       code-live backend (node:http)    
 | `src/hostMcp.js` | the only module that calls the host's bare `POST /mcp` (unsanctioned, outside the plugin API): `recentMessages`, `answerQuestion`, `approvePlan`, `rejectPlan`, and `pairMessages`. Errors carry `code` and `detail` (see [protocol](protocol.md#mcp-tools)) |
 | `src/answerMapping.js` | pure: `resolveAnswers` / `remapQuestion` map spoken choices to the host's exact labels; `describeAnswers` |
 | `src/hostEvents.js` | helpers shared by the service and announcer: `isConductor`, `summarize`, `assistantText`, `truncate`, `truncateBody`, `toolAsk`, `newestTurnEnd`, `lastAssistantMsgId`, `latestAskEvent`, `askTurnEnd`, `askId`, `renderQuestions`, `renderPlan`, `MAX_TEXT` |
-| `src/conductor.js` | the conductor service behind both the tools and the UI routes: `list`, `create`, `send`, `read`, `answer`, `approve`, `reject`, `resolve`, `setTarget`, `clearTarget`, `getTarget` |
-| `src/announcer.js` | turn-end reconciliation → SSE `announce`; target baselines. `reconcileLogged()` is the entry for triggers with no caller to reject to (`turn_notification`, `open`, `instances`, startup, baseline): a failure is logged, never an unhandled rejection |
+| `src/conductor.js` | the conductor service behind the tools: `list`, `create`, `send`, `read`, `answer`, `approve`, `reject`, `resolve`. `create`, `send`, `answer`, `approve` and `reject` call `announcer.watch` for the conductor they act on |
+| `src/announcer.js` | per-conductor turn-end reconciliation → SSE `announce`; `watch` adds a conductor to the announced set with a baseline. `reconcileLogged()` is the entry for triggers with no caller to reject to (`turn_notification`, `open`, `instances`, startup, `watch`): a failure is logged, never an unhandled rejection |
 | `src/sse.js` | SSE hub: boot-scoped ids, a 20-event replay ring, keepalive |
 | `src/http.js` | security headers, JSON body reading, the static allowlist |
 | `src/routes.js` | `ROUTES`, the HTTP API table |
@@ -49,7 +49,7 @@ browser (Code Live page)                       code-live backend (node:http)    
 | `public/sessionView.js` | session events → transcript and speaker; `isReplyEnd` (a `turnComplete` with `interactionStatus: IN_PROGRESS` doesn't end the bubble) |
 | `public/api.js` | backend client (relative URLs, `cache:'no-store'`) |
 | `public/transcript.js` | transcript rendering, merging streamed transcription chunks |
-| `public/settings.js`, `public/targetPicker.js` | the Settings pane and the target picker |
+| `public/settings.js` | the Settings pane |
 | `public/events.js` | `createEventStream`: an EventSource wrapper for `api/events` (same `addEventListener` surface). A native source stops for good when a reconnect gets a non-2xx reply, so on an `error` with `readyState` CLOSED it creates a new source after `retryMs` (doubling to `maxRetryMs`, reset on `open`; injectable `timers`), re-attaches every registered listener and passes the last non-empty event id as `?lastEventId=`. An `error` while CONNECTING is left to the native retry |
 | `public/announcements.js` | SSE → transcript and `sendText`; `ANNOUNCE_PREFIX`, `ASK_QUESTION_MARK`, `ASK_PLAN_MARK` and the footer line for an `ask` |
 | `public/audio.js`, `public/player.js`, `public/mic-worklet.js` | PCM conversion, `createChunker` (100 ms chunk buffering), gapless 24 kHz playback, the `pcm-capture` worklet |
@@ -62,10 +62,11 @@ Everything lives under `$PROJECTS_ROOT/.code-live/` (directory mode 0700). The p
 | file | contents | mode |
 |---|---|---|
 | `secrets.json` | `{"geminiApiKey":"…"}` | 0600 |
-| `state.json` | `{"activeTargetId":string\|null, "lastHandledTurnSeq":number, "lastHandledMsgId":string\|null, "lastHandledAskId":string\|null}` | 0600 |
+| `state.json` | `{"watched":{"<instanceId>":{"lastHandledTurnSeq":number, "lastHandledMsgId":string\|null, "lastHandledAskId":string\|null}}}` | 0600 |
 
 - Both files are written atomically: a temp file `.<name>.<pid>.<n>.tmp`, then a rename.
-- A `state.json` without `lastHandledMsgId` or `lastHandledAskId` loads it as `null`; a non-string value is `STORE_CORRUPT`.
+- An entry without `lastHandledMsgId` or `lastHandledAskId` loads it as `null`. A `watched` that is not an object, an entry that is not an object or lacks a numeric `lastHandledTurnSeq`, and a non-string id are `STORE_CORRUPT`.
+- Fields outside `watched` (a single-target `state.json` has `activeTargetId` and flat `lastHandled*` fields) are ignored whatever their type, so such a file loads as `{watched:{}}` and the next write drops them. Lookups use `Object.hasOwn`.
 - A malformed file throws `STORE_CORRUPT`; it is never treated as empty.
 - The backend fails to start if `state.json` is corrupt.
 
@@ -82,10 +83,10 @@ Everything lives under `$PROJECTS_ROOT/.code-live/` (directory mode 0700). The p
 
 ## Announcer
 
-Reconciling is the only path that announces. A turn is idempotent by its `_seq` together with the msgId of its last assistant message, and a pending question or plan, while that conductor stays the target, by its `tool_use` id (`lastHandledAskId`). Events with `parentToolUseId` (sub-agents) never count as turns or messages, matching the host:
+Reconciling is the only path that announces, and it runs per announced conductor (`state.watched`, see [Announced conductors](features.md#announced-conductors)). A turn is idempotent by its `_seq` together with the msgId of its last assistant message, and a pending question or plan by its `tool_use` id (`lastHandledAskId`), each kept in that conductor's own cursor. Events with `parentToolUseId` (sub-agents) never count as turns or messages, matching the host:
 
-1. It confirms the persisted target is a live conductor row in `GET /api/instances`. A missing row or a non-`.conduct` row clears the target (SSE `target: null`), so a worker is never announced. If the host is unreachable, it logs and stops.
-2. It reads the target's trailing 500 events. A `lastSeq` below `lastHandledTurnSeq` means the host reset the ring (rewind, prune, respawn), so the handled seq counts as `-1` for this pass.
+1. It confirms the conductor is a live conductor row in `GET /api/instances`. A missing row or a non-`.conduct` row prunes it from the announced set, so a worker is never announced. If the host is unreachable, it logs and stops.
+2. It reads the conductor's trailing 500 events. A `lastSeq` below `lastHandledTurnSeq` means the host reset the ring (rewind, prune, respawn), so the handled seq counts as `-1` for this pass.
 3. It takes the newest `turn_end` with `_seq` above the handled seq; with none, it stops.
 4. `msgId` is the last assistant message inside that turn. If it equals `lastHandledMsgId`, the turn is a replay of one already announced: the new seq is persisted and nothing is published. A turn with no `msgId` never matches.
 5. The row is the authority on whether an ask is pending (`toolAsk`). If it is, the newest matching `user_question` / `plan_request` event is the ask, and its own turn must have ended (a `turn_end` after it). An ask whose id is not `lastHandledAskId` is unannounced.
@@ -94,7 +95,7 @@ Reconciling is the only path that announces. A turn is idempotent by its `_seq` 
 6. It reads the content (below).
 7. It persists `{lastHandledTurnSeq, lastHandledMsgId}` (and `lastHandledAskId` for an ask) and publishes `announce`.
 
-A 404 clears the target (SSE `target: null`); other errors are logged.
+A 404 prunes the conductor; other errors are logged.
 
 **Content** comes from `hostMcp.recentMessages(row.sessionId)`:
 - `text` is the returned bodies joined with newlines, so a turn's plan or questions are included. `ask` is `{kind:"question", count}` or `{kind:"plan", planPath}` when an unannounced ask ended this turn, else `null`.
@@ -103,19 +104,20 @@ A 404 clears the target (SSE `target: null`); other errors are logged.
 - Over 4000 characters, `truncateBody` keeps a trailing `--- questions ---` section whole and cuts the prose before it. A section that alone exceeds the limit is shortened line by line (lines capped at 160, 80, 40 then 20 chars, so descriptions go first but a long label is cut too) and `ask.truncated` is set. If that is not enough, trailing lines are dropped whole, a `… N more line(s) not shown` line ends the section and `ask.dropped` is set. Anything else is cut from the end. Answering maps choices against the untruncated `user_question` event.
 
 **Triggers:**
-- a `turn_notification` whose `id` is the active target;
-- every host-link `open`;
+- a `turn_notification` whose `id` is an announced conductor (reconciles that conductor only);
+- every host-link `open` (one list read, then every announced conductor);
 - backend startup;
-- an `instances` frame (`reconcileAsk`), for a conductor the host stopped notifying about (it sends no `turn_notification` for a conductor that holds an armed wake on a worker).
+- an `instances` frame (`reconcileAsk`), for a conductor the host stopped notifying about (it sends no `turn_notification` for a conductor that holds an armed wake on a worker). It also prunes an announced conductor whose row is gone or no longer a conductor.
 
-`reconcileAsk` is coalesced to one queued run and does nothing unless the target row shows an unanswered tool ask whose `awaitingUser:lastResponseAt` differs from the ask state the last completed reconcile settled. A reconcile settles the state unless the ask's own turn is still running, so an unchanged ask costs one events read (and one MCP read when it announces); each further `instances` frame costs only the instance-list read. It announces only a pending ask, so a turn the host deliberately suppressed stays silent.
+`reconcileAsk` is coalesced to one queued run and reads the instance list once per run. For each announced conductor it does nothing unless the row shows an unanswered tool ask whose `awaitingUser:lastResponseAt` differs from the ask state that conductor's last completed reconcile settled. A reconcile settles the state unless the ask's own turn is still running, so an unchanged ask costs one events read (and one MCP read when it announces); each further `instances` frame costs only the instance-list read. It announces only a pending ask, so a turn the host deliberately suppressed stays silent.
 
 Duplicate triggers therefore never double-announce, and a turn missed during a disconnect or a restart is announced once.
 
 **Serialization:**
-- Reconciles, `baseline(id, seq?)` (a target switch) and `clear()` share one promise chain, so a reconcile for the old target cannot overwrite a new baseline.
-- `baseline` marks every turn the session has already finished as handled (`-1` for a freshly created conductor), so switching targets never announces old turns. It does not mark an ask as handled: `lastHandledAskId` is cleared (kept when the same target is picked again), and once the switch is stored it queues an ask-only reconcile, so a question or plan the row still shows as unanswered is announced when its conductor becomes the target. Switching back to a conductor still waiting on the same question or plan repeats it, as a reminder; only re-picking the current target keeps the record.
-- `send` awaits the switch (baseline included) **before** it sends the prompt. Otherwise a fast turn could end before the baseline and be marked handled unannounced. The test `a turn that ends right after a switching send is still announced` pins this ordering.
+- Every reconcile, `watch(id, {seq?, ask?})` and prune for every conductor shares one promise chain. A reconcile can therefore never overwrite a fresh baseline, and a turn that finishes on conductor B while A's announcement is being composed is reconciled right after, as its own `announce` with B's id. Nothing is dropped or merged. Parallel sends to two conductors do not race, because no state is shared between them.
+- `watch` is a no-op for a conductor that is already announced, so a second action never re-baselines it. For a new one it marks every turn the session has already finished as handled (`-1` for a freshly created conductor, passed as `seq`), then queues an ask-only reconcile, so a question or plan the row still shows as unanswered is announced once.
+- `watch(id, {ask})` is for `answer`, `approve` and `reject`: the newest ask of that kind is marked handled in the baseline (`lastHandledAskId`), so the queued ask-only reconcile cannot announce the question just answered while the row still shows it. The service calls it after every refusal check and before the host call.
+- `send` awaits `watch` (baseline included) **before** it sends the prompt. Otherwise a fast turn could end before the baseline and be marked handled unannounced. The test `a turn that ends right after the first send to a conductor is still announced` pins this ordering.
 
 **Restart replay:**
 - SSE ids are `<boot>-<n>`.
@@ -125,7 +127,7 @@ Duplicate triggers therefore never double-announce, and a turn missed during a d
 **Keep-alive:**
 - `frontend.keepAlive` in `conductor.plugin.json` gives the page its own resident frame in code-conductor, so the page can outlive many backend restarts.
 - The Gemini Live socket goes browser → Gemini, so a backend restart doesn't touch a running call.
-- What does depend on the backend reconnects: the event stream (`public/events.js`), Gemini resumes (`resumeDelayMs` spacing in `public/liveSession.js`), and tool calls (`CLIENT_ERROR` to Gemini while the backend is down). Target, handled turns and the key are persisted (`state.json`, `secrets.json`).
+- What does depend on the backend reconnects: the event stream (`public/events.js`), Gemini resumes (`resumeDelayMs` spacing in `public/liveSession.js`), and tool calls (`CLIENT_ERROR` to Gemini while the backend is down). The announced set with its cursors, and the key, are persisted (`state.json`, `secrets.json`).
 
 ## Security
 
@@ -136,7 +138,7 @@ Duplicate triggers therefore never double-announce, and a turn missed during a d
   - `connect-src` allows only same-origin and the Gemini Live origin.
   - It forbids framing by anything but the host.
 - **Why DOM text and CSP matter:** the plugin iframe is same-origin with code-conductor, whose API has no auth. They keep injected model output from acting on the host.
-- **The worker guard is in `resolve`.** A tool or target request that names a worker id is refused `NOT_A_CONDUCTOR` before any prompt or event read, and title matching considers only conductor rows.
+- **The worker guard is in `resolve`.** A tool that names a worker id is refused `NOT_A_CONDUCTOR` before any prompt or event read, and title matching considers only conductor rows.
 
 ## Tests
 

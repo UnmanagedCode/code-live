@@ -31,8 +31,6 @@ The route table is `ROUTES` in `src/routes.js`.
 | GET | `/api/models` | none | `{models:[{id, label, hint?}]}`; `hint` is present only for models that have one in `MODELS` |
 | POST | `/api/token` | `{model:string, resumeHandle?:string}` | `{token, wsUrl, model, expireTime}`; see [Token minting](#token-minting) |
 | POST | `/api/tools/call` | `{name:string, args?:object}` | always `200` with the [tool result](#tool-results); `400 INVALID_ARGS` only when `name` is not a string |
-| GET | `/api/conductors` | none | same as the `list_conductor_sessions` result |
-| PUT | `/api/target` | `{sessionId:string\|null}` | `{activeTarget:{sessionId,title}\|null}`. `null` clears. A string resolves like a tool's `session` arg (errors: `NOT_A_CONDUCTOR` 400, `UNKNOWN_SESSION` 404, `AMBIGUOUS_SESSION` 409) |
 | GET | `/api/events` | none | SSE stream; see below |
 
 ### `POST /api/token` errors
@@ -51,9 +49,8 @@ Each frame is `id: <boot>-<n>` / `event: <name>` / `data: <json>`. `<boot>` is r
 
 | event | data | sent |
 |---|---|---|
-| `target` | `{sessionId, title}` or `null` | on connect (**no id**; the current target, or `null` unless it is a live conductor row the host confirms), and on every target change |
 | `host` | `{connected:boolean}` | on connect (no id), and when the backend's host `/ws` link opens or closes |
-| `announce` | `{sessionId, title, text, turnSeq, isError, ask}` | when the active target finishes a turn. `text` is at most 4000 chars, or `(turn finished with no text reply)`. `ask` is `{kind:"question", count, truncated?, dropped?}` (AskUserQuestion pending; `text` holds the `--- questions ---` section; `truncated:true` means its lines were shortened to fit 4000 chars, and `dropped:true` that whole trailing lines (options, or questions) are missing and the last line says how many), `{kind:"plan", planPath:string\|null}` (ExitPlanMode pending), or `null` |
+| `announce` | `{sessionId, title, text, turnSeq, isError, ask}` | when an announced conductor finishes a turn (`sessionId` names it). `text` is at most 4000 chars, or `(turn finished with no text reply)`. `ask` is `{kind:"question", count, truncated?, dropped?}` (AskUserQuestion pending; `text` holds the `--- questions ---` section; `truncated:true` means its lines were shortened to fit 4000 chars, and `dropped:true` that whole trailing lines (options, or questions) are missing and the last line says how many), `{kind:"plan", planPath:string\|null}` (ExitPlanMode pending), or `null` |
 
 - **Replay:** the backend keeps the last 20 id-bearing events.
   - A request with `Last-Event-ID` from this process gets every ring event after it.
@@ -70,17 +67,17 @@ The declarations are `DECLARATIONS` in `src/tools.js`, with parameter types in G
 |---|---|
 | `list_conductor_sessions` | none |
 | `create_conductor_session` | none |
-| `send_to_conductor` | `text` STRING (required, non-empty), `session` STRING (optional: conductor id or exact title, case-insensitive) |
-| `read_conductor_messages` | `session` STRING (optional), `count` INTEGER (optional, 1–10) |
-| `answer_conductor_question` | `answers` ARRAY (required) of OBJECT `{choices: ARRAY<STRING>, text: STRING, note: STRING}`; entry *n* answers question *n*. A choice is an option number or its words (numbers are also accepted) |
-| `approve_conductor_plan` | `confirmed` BOOLEAN (required; must be `true`), `feedback` STRING (optional) |
-| `reject_conductor_plan` | `feedback` STRING (optional) |
+| `send_to_conductor` | `session` STRING (required), `text` STRING (required, non-empty) |
+| `read_conductor_messages` | `session` STRING (required), `count` INTEGER (optional, 1–10) |
+| `answer_conductor_question` | `session` STRING (required), `answers` ARRAY (required) of OBJECT `{choices: ARRAY<STRING>, text: STRING, note: STRING}`; entry *n* answers question *n*. A choice is an option number or its words (numbers are also accepted) |
+| `approve_conductor_plan` | `session` STRING (required), `confirmed` BOOLEAN (required; must be `true`), `feedback` STRING (optional) |
+| `reject_conductor_plan` | `session` STRING (required), `feedback` STRING (optional) |
 
-An omitted `session` (or one that is empty or whitespace) means the active target. The answer, approve and reject tools act on the active target only.
+`session` is a conductor id or an exact title, case-insensitive. A missing, empty or whitespace-only `session` is `INVALID_ARGS`, and a non-string one is `INVALID_ARGS` too, both before any host request. A tool acts only on the conductor it names. `send_to_conductor`, `create_conductor_session`, `answer_conductor_question`, `approve_conductor_plan` and `reject_conductor_plan` also add that conductor to the announced set (see [Announced conductors](features.md#announced-conductors)).
 
 ### Tool results
 
-A session summary is `{sessionId, title, status, lastResponseAt}`. `status` is the host's run state, derived from the `GET /api/instances` row fields `status`, `displayStatus` and `awaitingWake` (`summarize` in `src/hostEvents.js`); the target picker shows the same value. `title` is the instance title, else the first prompt cut to 60 chars (`…` suffix), else `Untitled conductor`.
+A session summary is `{sessionId, title, status, lastResponseAt}`. `status` is the host's run state, derived from the `GET /api/instances` row fields `status`, `displayStatus` and `awaitingWake` (`summarize` in `src/hostEvents.js`). `title` is the instance title, else the first prompt cut to 60 chars (`…` suffix), else `Untitled conductor`.
 
 | host row | reported `status` |
 |---|---|
@@ -91,9 +88,9 @@ A session summary is `{sessionId, title, status, lastResponseAt}`. `status` is t
 
 | tool | success |
 |---|---|
-| `list_conductor_sessions` | `{ok:true, sessions:[summary + active:boolean], activeTarget:{sessionId,title}\|null}` |
-| `create_conductor_session` | `{ok:true, session:summary, activeTargetChanged:true, activeTarget:{sessionId,title}}` |
-| `send_to_conductor` | `{ok:true, sessionId, title, delivered:true, note:"The reply will be announced when the conductor finishes its turn."}`, plus `activeTargetChanged:true, activeTarget` when the target switched |
+| `list_conductor_sessions` | `{ok:true, sessions:[summary]}` |
+| `create_conductor_session` | `{ok:true, session:summary}` |
+| `send_to_conductor` | `{ok:true, sessionId, title, delivered:true, note:"The reply will be announced when the conductor finishes its turn."}` |
 | `read_conductor_messages` | `{ok:true, sessionId, title, messages:[{text, hasPlan?, planPath?, questionCount?}]}`: oldest first, each `text` ≤ 4000 chars. See [reading messages](#reading-messages) |
 | `answer_conductor_question` | `{ok:true, sessionId, title, delivered:true, answered:[{question, answer}], note}`; `question` is 1-based and `answer` is the label list or the free text that was sent |
 | `approve_conductor_plan` | `{ok:true, sessionId, title, mode, delivered:true, note}`; `mode` is the host's reported mode (`bypassPermissions`) |
@@ -103,10 +100,9 @@ Failures are `{ok:false, code, message}`:
 
 | code | meaning |
 |---|---|
-| `INVALID_ARGS` | argument type or bounds wrong, or `args` not an object |
+| `INVALID_ARGS` | argument type or bounds wrong, `session` missing, or `args` not an object |
 | `UNKNOWN_TOOL` | no such tool |
-| `NO_ACTIVE_TARGET` | `session` omitted and no target set |
-| `SESSION_GONE` | the active target is no longer live (the target is cleared), or the host 404s the session |
+| `SESSION_GONE` | the host 404s the session |
 | `NOT_A_CONDUCTOR` | the id names a worker session; nothing is sent to it |
 | `UNKNOWN_SESSION` | no conductor matches; the message lists the available ones |
 | `AMBIGUOUS_SESSION` | several conductors share the title; the message lists their ids |
@@ -116,8 +112,8 @@ Failures are `{ok:false, code, message}`:
 | `ACK_TIMEOUT` | no ack within 10 s |
 | `HOST_DISCONNECTED` | the `/ws` link dropped before the ack |
 | `SESSION_NOT_READY` | the conductor row has no host session id yet (still spawning) |
-| `NO_PENDING_QUESTION` | the row shows no unanswered tool question |
-| `NO_PENDING_PLAN` | the row shows no unanswered tool plan, or the host's latest messages hold none; the message names which |
+| `NO_PENDING_QUESTION` | the named conductor's row shows no unanswered tool question; the message starts with its title |
+| `NO_PENDING_PLAN` | the named conductor's row shows no unanswered tool plan, or the host's latest messages hold none; the message starts with its title and says which |
 | `CONFIRMATION_REQUIRED` | `approve_conductor_plan` without `confirmed: true` |
 | `INVALID_OPTION` | a choice matches no option, or several; carries `question` and `offered` |
 | `NOT_MULTISELECT` | several choices for a question the host treats as single-choice (only when its options could not be read first); carries the 1-based `question` |
@@ -146,8 +142,6 @@ Failures are `{ok:false, code, message}`:
 - **Approval:** `confirmed` must be exactly `true`, else `CONFIRMATION_REQUIRED` with no host call at all. The host switches a plan-mode conductor to `bypassPermissions` on approval. Reject keeps plan mode.
 - Missing trailing answer entries are skipped; extra entries are `ANSWER_COUNT_MISMATCH`.
 - A failed result may add `question` (1-based), `offered` (labels) and, for `ANSWER_COUNT_MISMATCH`, `expected` and `got`.
-
-If a send switched the target and then failed, its message ends with `("<title>" is now the active target.)`.
 
 ## code-conductor host calls
 

@@ -122,15 +122,15 @@ test('the re-created URL carries the last non-empty event id', () => {
   // id-less initial frames (empty lastEventId) never clear it; with no id
   // yet the URL is the bare one.
   const { stream, sources, clock } = setup();
-  stream.addEventListener('target', () => {});
+  stream.addEventListener('host', () => {});
   stream.addEventListener('announce', () => {});
   assert.equal(sources[0].url, 'api/events');
-  sources[0].emit('target', { data: '{}', lastEventId: '' });
+  sources[0].emit('host', { data: '{}', lastEventId: '' });
   sources[0].fail();
   clock.runNext();
   assert.equal(sources[1].url, 'api/events', 'only id-less frames so far: no query');
   sources[1].emit('announce', { data: '{}', lastEventId: 'ab12-3' });
-  sources[1].emit('target', { data: '{}', lastEventId: '' });
+  sources[1].emit('host', { data: '{}', lastEventId: '' });
   sources[1].fail();
   clock.runNext();
   assert.equal(sources[2].url, 'api/events?lastEventId=ab12-3');

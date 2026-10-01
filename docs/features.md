@@ -8,7 +8,6 @@ User-facing behavior of the Code Live page and its voice tools. Wire shapes are 
 |---|---|
 | status bar | session state pill (`idle`, `connecting`, `live`, `reconnecting`, `error`) the `Mic paused` pill (shown only while the mic is paused), and the host indicator (`Host connected` / `Host disconnected`: the backend's link to code-conductor's `/ws`) |
 | controls | **Model** select (the pinned models from `GET api/models`; a model with a `hint` shows it after the label, e.g. `Gemini 3.8 Live Extended Thinking (tool calls usually fail)`), **Connect**, **Pause mic** / **Resume mic**, **Disconnect** |
-| target picker | **Conductor** select listing live conductor sessions as `<title> (<status>)` (`<status>` is the run state `list_conductor_sessions` reports: [protocol](protocol.md#tool-results)), plus `— no active conductor —`; **Refresh** reloads it. Choosing one sets the active target |
 | transcript | You / Gemini transcription bubbles, tool calls and results as JSON, conductor announcements, status and error lines |
 | Settings (collapsible) | Gemini API key: password field, **Save**, **Clear**, and the status `Key set (••••<last 4>)` or `No key set` |
 
@@ -35,46 +34,50 @@ User-facing behavior of the Code Live page and its voice tools. Wire shapes are 
 
 ## Voice tools
 
-Gemini decides when to call these; each call and its result appear in the transcript.
+Gemini decides when to call these; each call and its result appear in the transcript. Every tool that acts on a conductor needs that conductor's `session`: the id from its announcement or from `list_conductor_sessions`, or its exact title (any case). Several conductors can be live at once, and nothing picks one for Gemini.
 
 | tool | behavior the user hears about |
 |---|---|
-| `list_conductor_sessions` | the live conductor sessions with each one's run state, and which one is active; worker sessions never appear |
-| `create_conductor_session` | starts a new conductor and makes it the active target. It takes no prompt: Gemini follows up with `send_to_conductor` |
-| `send_to_conductor` | sends your words to a conductor. Without a session it goes to the active target. With one (an id, or an exact title in any case), that session becomes the active target and Gemini says which one. The reply comes later as an announcement |
-| `read_conductor_messages` | reads back the latest assistant message of a session (active target by default) together with the plan or questions its turn ended on, without changing the target. With a `count` (1–10) it reads back exactly that many messages |
-| `answer_conductor_question` | answers the questions the active conductor is waiting on |
-| `approve_conductor_plan` | approves the plan the active conductor is waiting on, after a spoken yes |
+| `list_conductor_sessions` | the live conductor sessions with each one's run state; worker sessions never appear |
+| `create_conductor_session` | starts a new conductor and announces its replies from then on. It takes no prompt: Gemini follows up with `send_to_conductor` using the returned session id |
+| `send_to_conductor` | sends your words to the named conductor and announces its replies from then on. The reply comes later as an announcement |
+| `read_conductor_messages` | reads back the latest assistant message of the named session together with the plan or questions its turn ended on. With a `count` (1–10) it reads back exactly that many messages. It never starts announcing the session |
+| `answer_conductor_question` | answers the questions the named conductor is waiting on |
+| `approve_conductor_plan` | approves the plan the named conductor is waiting on, after a spoken yes |
 | `reject_conductor_plan` | rejects that plan, with feedback, so the conductor revises it |
 
-A title matches the name shown in the picker: the session title, else the first 60 characters of its first prompt, else `Untitled conductor`. A title shared by several conductors is refused as ambiguous, and Gemini asks for the id.
+A title is the name `list_conductor_sessions` shows: the session title, else the first 60 characters of its first prompt, else `Untitled conductor`. A title shared by several conductors is refused as ambiguous, and Gemini asks for the id.
 
-Failures come back to Gemini as `ok:false` with a code, and Gemini explains them. Examples: no active target, a worker named, the host unreachable, or the host refusing the prompt. See [protocol.md](protocol.md#tool-results).
+When it is unclear which conductor you mean, Gemini asks you, offering titles from the list, instead of guessing.
 
-## Active target and announcements
+Failures come back to Gemini as `ok:false` with a code, and Gemini explains them. Examples: a missing session, a worker named, the host unreachable, or the host refusing the prompt. See [protocol.md](protocol.md#tool-results).
 
-- The **active target** is one conductor session, stored across backend restarts. These set it:
-  - a named `send_to_conductor`;
-  - `create_conductor_session`;
-  - the target picker.
-- `read_conductor_messages` never changes it.
-- When the target changes, turns the session had already finished are marked as handled, so only new turns are announced. A question or plan that session is still waiting on is not a finished turn: it is announced as the switch happens. Switching back to a conductor still waiting on the same question or plan repeats it, as a reminder.
-- When the active target finishes a turn, its last text reply appears in the transcript as a **Conductor · `<title>`** entry. While the session is `live` (including while the mic is paused), it is also sent to Gemini as `CONDUCTOR UPDATE from "<title>":` followed by the text. Gemini reads a short reply in full and summarizes a long or code-heavy one. A turn with no text reply is announced as `(turn finished with no text reply)`. Replies are cut at 4000 characters.
-- An announcement that ends on a question or plan has `· question` or `· plan` after the title in its transcript label, and a final line for Gemini (`AWAITING ANSWER` or `AWAITING PLAN APPROVAL`) that is not shown in the transcript.
+## Announced conductors
+
+Only conductors code-live has acted on are announced; every other conductor stays silent, including the one you may be talking to in code-conductor's own UI.
+
+- **How a conductor is added** (the first time only): `create_conductor_session`, `send_to_conductor`, `answer_conductor_question`, `approve_conductor_plan` or `reject_conductor_plan` for it. `read_conductor_messages` and `list_conductor_sessions` never add one.
+- **Adding marks the past as handled.** Turns the conductor had already finished are not announced. A question or plan it is still waiting on is not a finished turn: it is announced once when the conductor is added. When the adding action is the answer or decision for that very question or plan, it is not announced again.
+- **Acting on an announced conductor again changes nothing**: its record of announced turns is kept.
+- **How a conductor is removed:** only when it ends. A conductor that is gone from code-conductor's list, no longer a conductor, or whose events the host 404s is dropped from the announced set. There is no tool to stop announcing a live conductor.
+- **The set is stored across backend restarts** in `state.json`. A `state.json` written by a version with a single active target loads as an empty set: nothing is announced until a conductor is acted on again.
+- When an announced conductor finishes a turn, its last text reply appears in the transcript as a **Conductor · `<title>`** entry. While the session is `live` (including while the mic is paused), it is also sent to Gemini as `CONDUCTOR UPDATE from "<title>" (session <id>):` followed by the text. Gemini reads a short reply in full and summarizes a long or code-heavy one, and says which conductor it is from when several are in play. A turn with no text reply is announced as `(turn finished with no text reply)`. Replies are cut at 4000 characters.
+- **Several conductors finishing together** are announced one after another, each as its own update with its own session id. None is dropped or merged.
+- An announcement that ends on a question or plan has `· question` or `· plan` after the title in its transcript label, and a final line for Gemini (`AWAITING ANSWER` or `AWAITING PLAN APPROVAL`, naming the tool to call and the session id) that is not shown in the transcript.
 - An announcement arriving while the session is not live stays in the transcript only; it is not spoken later.
-- If the active target's session disappears from code-conductor, the target is cleared and the picker shows `— no active conductor —`.
 
 ## Answering and approving by voice
 
-When the active conductor ends a turn on a question or a plan, the announcement includes it, and Gemini acts on it.
+When an announced conductor ends a turn on a question or a plan, the announcement includes it, and Gemini acts on it.
 
 - **Questions:** Gemini reads each question with its numbered options and asks you. A very long set of questions is shortened to fit: option descriptions first, then long labels, and if that is still not enough some trailing options are left out. Gemini says so, and option numbers still work. Answer with the option number or its words (`the second`, `sqlite`). A multi-select question takes several options, a question can be answered with your own words instead, and a remark can go along with a choice. Skipped questions are left unanswered. If an option can't be matched, Gemini reads the options back and asks again.
 - **Plans:** Gemini summarizes the plan and asks whether to approve or reject it.
   - **Approve:** Gemini first says that approving lets the conductor run without permission prompts, and waits for an explicit yes. The confirmation is enforced by Gemini's instructions and the tool's `confirmed` flag, not checked against your speech. It guards against a misheard utterance and is not a security boundary: conductor-written text reaches Gemini and could itself prompt an approval, which grants nothing a conductor cannot already do through the open host API.
   - **Reject:** say what to change. The conductor stays in plan mode and revises the plan.
-- While that conductor stays the target, a question or plan that is still waiting is announced once, even if the conductor has run other turns since.
-- These work only while the conductor is actually waiting. Once it has been answered (here or in the code-conductor UI), a further answer or decision is refused.
-- They act on the active target only, and depend on the host's `/mcp` endpoint (see the README's known limitations).
+- A question or plan that is still waiting is announced once, even if the conductor has run other turns since.
+- These work only while the named conductor is actually waiting. Once it has been answered (here or in the code-conductor UI), a further answer or decision is refused, and the refusal names that conductor. Another conductor that is waiting is never touched.
+- Gemini passes the session id from the announcement it is answering. If it is unclear which conductor you mean, it asks.
+- They depend on the host's `/mcp` endpoint (see the README's known limitations).
 
 ## Leaving the page
 

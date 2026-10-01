@@ -42,25 +42,10 @@ export const ROUTES = [
     },
   },
 
-  { method: 'GET', path: '/api/conductors', handler: async ({ deps }) => ({ body: await deps.service.list() }) },
-
-  {
-    method: 'PUT', path: '/api/target', json: true,
-    handler: async ({ body, deps }) => {
-      if (body.sessionId === null) {
-        await deps.service.clearTarget();
-        return { body: { activeTarget: null } };
-      }
-      if (typeof body.sessionId !== 'string' || body.sessionId === '') throw new HttpError(400, 'INVALID_ARGS', 'sessionId must be a string or null');
-      return { body: { activeTarget: await deps.service.setTarget(body.sessionId) } };
-    },
-  },
-
   {
     method: 'GET', path: '/api/events',
-    handler: async ({ req, res, deps }) => {
+    handler: ({ req, res, deps }) => {
       deps.sse.handle(req, res, [
-        ['target', await deps.service.getTarget()],
         ['host', { connected: deps.link.isOpen() }],
       ]);
     },

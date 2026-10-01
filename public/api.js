@@ -19,7 +19,5 @@ export function createApi(fetchImpl = (...a) => fetch(...a)) {
     getModels: () => call('GET', 'api/models'),
     mintToken: (model, resumeHandle) => call('POST', 'api/token', { model, ...(resumeHandle ? { resumeHandle } : {}) }),
     callTool: (name, args) => call('POST', 'api/tools/call', { name, args: args ?? {} }),
-    getConductors: () => call('GET', 'api/conductors'),
-    setTarget: (sessionId) => call('PUT', 'api/target', { sessionId }),
   };
 }

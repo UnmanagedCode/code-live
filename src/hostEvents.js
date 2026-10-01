@@ -1,5 +1,5 @@
 // Reading code-conductor instance summaries and event streams: shared by the
-// conductor service (tools, target picker) and the announcer.
+// conductor service and the announcer.
 
 export const CONDUCTOR_PROJECT = '.conduct';
 export const MAX_TEXT = 4000;

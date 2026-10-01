@@ -1,24 +1,29 @@
-// Pins: every finished turn of the active conductor is announced over SSE
-// exactly once, including turns whose notification was missed (host /ws down,
-// backend restarted, or a fast turn right after a target switch), while old
-// turns, other sessions and duplicate notifications stay silent.
+// Pins: every finished turn of an announced conductor (one this backend has
+// acted on) is announced over SSE exactly once, with its own session id,
+// including turns whose notification was missed (host /ws down, backend
+// restarted, or a fast turn right after the first send), while old turns,
+// conductors never acted on and duplicate notifications stay silent.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { startFakeHost } from './fakes/fakeHost.mjs';
-import { startApp, sseClient, callTool, req, waitFor, CONDUCTOR_A, CONDUCTOR_B, WORKER } from './helpers.mjs';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import { startFakeHost, mcpOk, mcpThrown } from './fakes/fakeHost.mjs';
+import { startApp, sseClient, callTool, waitFor, tempDir, CONDUCTOR_A, CONDUCTOR_B, WORKER } from './helpers.mjs';
 
 const reply = (text) => ({ kind: 'assistant_message', message: { content: [{ type: 'text', text }] } });
 
-async function setup(t, { events = {}, active = 'cond-a', baseline = true } = {}) {
+const cursor = (app, id = 'cond-a') => app.deps.state.get().watched[id];
+
+async function setup(t, { events = {}, watch = ['cond-a'], baseline = true } = {}) {
   const host = await startFakeHost({ instances: [CONDUCTOR_A, CONDUCTOR_B, WORKER], events });
   const app = await startApp({ host });
-  if (active) {
-    if (baseline) await app.deps.service.setTarget(active);
-    else await app.deps.state.update({ activeTargetId: active, lastHandledTurnSeq: -1 });
+  for (const id of watch) {
+    if (baseline) await app.deps.announcer.watch(id);
+    else await app.deps.state.update({ watched: { ...app.deps.state.get().watched, [id]: { lastHandledTurnSeq: -1, lastHandledMsgId: null, lastHandledAskId: null } } });
   }
   const sse = sseClient(`${app.url}/api/events`);
   await sse.ready;
-  await sse.next('target');
+  await sse.next('host');
   t.after(async () => { sse.close(); await app.stop(); await host.close(); });
   return { host, app, sse };
 }
@@ -32,7 +37,7 @@ async function drain(app, sse) {
   return sse.events.filter((e) => e.event === 'announce').map((e) => e.data);
 }
 
-test('a turn_notification for the active target announces its last text reply', async (t) => {
+test('a turn_notification for an announced conductor announces its last text reply', async (t) => {
   const { host, app, sse } = await setup(t);
   host.addEvent('cond-a', reply('thinking out loud'));
   host.addEvent('cond-a', { kind: 'assistant_message', message: { content: [{ type: 'text', text: 'Done: ' }, { type: 'tool_use', id: 't', name: 'x', input: {} }, { type: 'text', text: 'all green' }] } });
@@ -42,38 +47,38 @@ test('a turn_notification for the active target announces its last text reply', 
   const ev = await sse.next('announce');
   assert.deepEqual(ev.data, { sessionId: 'cond-a', title: 'Alpha plan', text: 'Done: \nall green', turnSeq: end._seq, isError: false, ask: null });
   assert.match(ev.id, /^[0-9a-f]+-\d+$/);
-  assert.equal(app.deps.state.get().lastHandledTurnSeq, end._seq);
+  assert.equal(cursor(app).lastHandledTurnSeq, end._seq);
 });
 
-test('other sessions and duplicate notifications are not announced', async (t) => {
+test('conductors never acted on, and duplicate notifications, are not announced', async (t) => {
   const { host, app, sse } = await setup(t);
-  host.finishTurn('cond-b', 'not the target');
-  host.finishTurn('cond-a', 'the target');
+  host.finishTurn('cond-b', 'never acted on');
+  host.finishTurn('cond-a', 'the announced one');
   host.broadcast({ t: 'turn_notification', id: 'cond-a' });
   host.broadcast({ t: 'turn_notification', id: 'cond-a' });
   await waitFor(() => host.requests.filter((q) => q.url.startsWith('/api/instances/cond-a/events')).length >= 3);
   const announced = await drain(app, sse);
-  assert.deepEqual(announced.map((a) => a.text), ['the target']);
+  assert.deepEqual(announced.map((a) => a.text), ['the announced one']);
 });
 
-test('switching target baselines: its earlier turns stay silent', async (t) => {
+test('the first send to a conductor baselines it: its earlier turns stay silent', async (t) => {
   const { host, app, sse } = await setup(t, { events: { 'cond-b': [reply('old news'), { kind: 'turn_end' }] } });
-  const r = await req(`${app.url}/api/target`, { method: 'PUT', body: { sessionId: 'cond-b' } });
-  assert.deepEqual(r.json.activeTarget, { sessionId: 'cond-b', title: 'Build the beta release pipeline and report back on everythi…' });
-  const target = await sse.next('target', (d) => d?.sessionId === 'cond-b');
-  assert.equal(target.data.sessionId, 'cond-b');
+  const r = await callTool(app, 'send_to_conductor', { session: 'cond-b', text: 'go' });
+  assert.equal(r.ok, true);
   host.broadcast({ t: 'turn_notification', id: 'cond-b' });
   assert.deepEqual(await drain(app, sse), []);
   host.finishTurn('cond-b', 'fresh news');
-  assert.equal((await sse.next('announce')).data.text, 'fresh news');
+  const ev = await sse.next('announce');
+  assert.equal(ev.data.text, 'fresh news');
+  assert.equal(ev.data.sessionId, 'cond-b');
 });
 
-test('a turn that ends right after a switching send is still announced', async (t) => {
+test('a turn that ends right after the first send to a conductor is still announced', async (t) => {
   const { host, app, sse } = await setup(t, { events: { 'cond-b': [reply('old news'), { kind: 'turn_end' }] } });
   // The host finishes the turn (and notifies) before it even acks the prompt.
   host.onPrompt((msg) => host.finishTurn(msg.id, `reply to ${msg.text}`));
   const r = await callTool(app, 'send_to_conductor', { text: 'go', session: 'cond-b' });
-  assert.equal(r.activeTargetChanged, true);
+  assert.equal(r.ok, true);
   const ev = await sse.next('announce');
   assert.equal(ev.data.sessionId, 'cond-b');
   assert.equal(ev.data.text, 'reply to go');
@@ -81,10 +86,10 @@ test('a turn that ends right after a switching send is still announced', async (
 });
 
 test('a create followed by a fast first turn is announced', async (t) => {
-  const { host, app, sse } = await setup(t, { active: null });
+  const { host, app, sse } = await setup(t, { watch: [] });
   host.onPrompt((msg) => host.finishTurn(msg.id, 'hello from the new conductor'));
   const created = await callTool(app, 'create_conductor_session');
-  await callTool(app, 'send_to_conductor', { text: 'start' });
+  await callTool(app, 'send_to_conductor', { text: 'start', session: created.session.sessionId });
   const ev = await sse.next('announce');
   assert.equal(ev.data.sessionId, created.session.sessionId);
   assert.equal(ev.data.text, 'hello from the new conductor');
@@ -106,7 +111,7 @@ test('a turn missed while the host link was down is announced once on reconnect'
 test('a turn finished while the backend was down is announced at startup', async (t) => {
   const host = await startFakeHost({ instances: [CONDUCTOR_A] });
   const first = await startApp({ host });
-  await first.deps.service.setTarget('cond-a');
+  await first.deps.announcer.watch('cond-a');
   const sse1 = sseClient(`${first.url}/api/events`);
   await sse1.ready;
   first.deps.sse.publish('marker', {});
@@ -136,7 +141,7 @@ test('?lastEventId= replays like the Last-Event-ID header, and the header wins w
   // both, the header's (newer) id decides.
   const host = await startFakeHost({ instances: [CONDUCTOR_A] });
   const first = await startApp({ host });
-  await first.deps.service.setTarget('cond-a');
+  await first.deps.announcer.watch('cond-a');
   const sse1 = sseClient(`${first.url}/api/events`);
   await sse1.ready;
   first.deps.sse.publish('marker', {});
@@ -178,18 +183,18 @@ test('Last-Event-ID replays only what was missed; a fresh page gets none', async
   await fresh.next('marker');
   assert.deepEqual(again.events.filter((e) => e.event === 'announce').map((e) => e.data.text), ['two']);
   assert.deepEqual(fresh.events.filter((e) => e.event === 'announce'), []);
-  assert.equal(fresh.events[0].event, 'target');
+  assert.equal(fresh.events[0].event, 'host');
   assert.equal(fresh.events[0].id, undefined, 'initial state does not move Last-Event-ID');
-  assert.deepEqual(fresh.events[0].data, { sessionId: 'cond-a', title: 'Alpha plan' });
+  assert.deepEqual(fresh.events[0].data, { connected: true });
 });
 
-test('a vanished target is cleared', async (t) => {
+test('a vanished conductor is pruned from the announced set by an instances frame', async (t) => {
   const { host, app, sse } = await setup(t);
   host.state.instances.splice(host.state.instances.findIndex((i) => i.id === 'cond-a'), 1);
-  host.broadcast({ t: 'turn_notification', id: 'cond-a' });
-  const ev = await sse.next('target', (d) => d === null);
-  assert.equal(ev.data, null);
-  assert.equal(app.deps.state.get().activeTargetId, null);
+  host.broadcast({ t: 'instances', instances: host.state.instances });
+  await waitFor(() => cursor(app) === undefined, { what: 'the vanished conductor to be pruned' });
+  assert.deepEqual(app.deps.state.get().watched, {});
+  assert.deepEqual(await drain(app, sse), []);
 });
 
 test('a turn with no text reply is announced as such', async (t) => {
@@ -201,13 +206,11 @@ test('a turn with no text reply is announced as such', async (t) => {
   assert.equal(ev.data.isError, true);
 });
 
-test('a persisted worker id is never announced and is cleared', async (t) => {
-  const { host, app, sse } = await setup(t, { active: null });
-  await app.deps.state.update({ activeTargetId: 'worker-1', lastHandledTurnSeq: -1 });
+test('a persisted worker id in the announced set is never read and is pruned', async (t) => {
+  const { host, app, sse } = await setup(t, { watch: [] });
+  await app.deps.state.update({ watched: { 'worker-1': { lastHandledTurnSeq: -1, lastHandledMsgId: null, lastHandledAskId: null } } });
   host.finishTurn('worker-1', 'worker output');
-  const ev = await sse.next('target', (d) => d === null);
-  assert.equal(ev.data, null);
-  assert.equal(app.deps.state.get().activeTargetId, null);
+  await waitFor(() => cursor(app, 'worker-1') === undefined, { what: 'the worker id to be pruned' });
   assert.deepEqual(await drain(app, sse), []);
   assert.ok(!host.requests.some((q) => q.url.startsWith('/api/instances/worker-1/')), 'no event read for the worker');
 });
@@ -223,24 +226,6 @@ test('the announced text is the reply before the turn_end, not the next turn\'s'
   assert.ok(logged.mock.calls.some((c) => /later turn has spoken/.test(String(c.arguments[0]))), 'the stale-turn fallback is logged');
   assert.equal(ev.data.text, 'reply to turn one');
   assert.equal(ev.data.turnSeq, end._seq);
-});
-
-test('a persisted worker id is never shown as the target', async (t) => {
-  const host = await startFakeHost({ instances: [CONDUCTOR_A, WORKER] });
-  const app = await startApp({ host });
-  t.after(async () => { await app.stop(); await host.close(); });
-  // As if state.json were hand-edited; no reconcile has run since.
-  await app.deps.state.update({ activeTargetId: 'worker-1', lastHandledTurnSeq: -1 });
-  assert.equal(await app.deps.service.getTarget(), null);
-  const sse = sseClient(`${app.url}/api/events`);
-  t.after(() => sse.close());
-  const first = await sse.next('target');
-  assert.equal(first.data, null);
-  assert.equal(sse.events[0], first, 'the initial event names no target');
-  await app.deps.state.update({ activeTargetId: 'cond-a' });
-  assert.deepEqual(await app.deps.service.getTarget(), { sessionId: 'cond-a', title: 'Alpha plan' });
-  await host.close();
-  assert.equal(await app.deps.service.getTarget(), null, 'unverifiable while the host is down');
 });
 
 // ---- questions and plans ----
@@ -265,7 +250,7 @@ test('a turn ending on AskUserQuestion announces its questions with every option
   assert.deepEqual(ev.data.ask, { kind: 'question', count: 2 });
   assert.match(ev.data.text, /^Two quick things\.\n--- questions ---\n1\. Which database\? \(multiSelect: false\) · header: DB\n   - Postgres \(Recommended\): robust\n   - SQLite: tiny: embedded\n2\. Which checks\? \(multiSelect: true\) · header: Checks\n   - Lint: style\n   - Test: unit$/);
   assert.deepEqual(mcpReads(host).map((c) => c.arguments), [{ sessionId: 's-a' }], 'read by the host session id, with no count');
-  assert.equal(app.deps.state.get().lastHandledMsgId, `m${end._seq - 2}`);
+  assert.equal(cursor(app).lastHandledMsgId, `m${end._seq - 2}`);
 });
 
 test('a turn ending on ExitPlanMode announces the plan with ask.planPath', async (t) => {
@@ -313,7 +298,7 @@ test('a suppressed turn without an ask stays silent on instances frames', async 
   assert.deepEqual(announces(sse), []);
   assert.equal(mcpReads(host).length, 0, 'nothing was read');
   assert.equal(host.requests.filter((q) => q.url.startsWith('/api/instances/cond-a/events')).length, 0);
-  assert.equal(app.deps.state.get().lastHandledTurnSeq, -1, 'state untouched');
+  assert.equal(cursor(app).lastHandledTurnSeq, -1, 'state untouched');
 });
 
 test('a burst of instances frames costs one MCP read', async (t) => {
@@ -385,15 +370,15 @@ test('a host ring reset replays nothing, and the next turn is announced', async 
   await app.deps.announcer.reconcile();
   await settle(app, sse);
   assert.deepEqual(announces(sse).map((a) => a.text), ['turn two']);
-  const handled = app.deps.state.get();
+  const handled = cursor(app);
   assert.equal(handled.lastHandledTurnSeq, second._seq);
   // Respawn: the history is replayed into a ring with fewer, renumbered events.
   host.resetRing('cond-a', { drop: (ev) => ev.kind === 'tool_use' });
   await app.deps.announcer.reconcile();
   await settle(app, sse);
   assert.equal(announces(sse).length, 1, 'the replayed turn is not announced again');
-  assert.equal(app.deps.state.get().lastHandledTurnSeq, 4, 'the handled seq follows the renumbering');
-  assert.equal(app.deps.state.get().lastHandledMsgId, handled.lastHandledMsgId);
+  assert.equal(cursor(app).lastHandledTurnSeq, 4, 'the handled seq follows the renumbering');
+  assert.equal(cursor(app).lastHandledMsgId, handled.lastHandledMsgId);
   host.finishTurn('cond-a', 'turn three');
   assert.equal((await sse.next('announce', (d) => d.text === 'turn three')).data.turnSeq, 6);
 });
@@ -402,14 +387,14 @@ test('a replayed turn is silent even when its new _seq is higher than the handle
   const { host, app, sse } = await setup(t);
   host.finishTurn('cond-a', 'already heard', { notify: false });
   await app.deps.announcer.reconcile();
-  const heard = app.deps.state.get();
+  const heard = cursor(app);
   // Replay under shifted numbering: two extra events up front.
   host.resetRing('cond-a');
   host.state.events['cond-a'] = [{ kind: 'tool_use', _seq: 1 }, { kind: 'tool_use', _seq: 2 }, ...host.state.events['cond-a'].map((ev) => ({ ...ev, _seq: ev._seq + 2 }))];
   await app.deps.announcer.reconcile();
   await settle(app, sse);
   assert.equal(announces(sse).length, 1);
-  assert.equal(app.deps.state.get().lastHandledTurnSeq, heard.lastHandledTurnSeq + 2);
+  assert.equal(cursor(app).lastHandledTurnSeq, heard.lastHandledTurnSeq + 2);
 });
 
 test('a turn that said nothing is announced even after an announced turn', async (t) => {
@@ -431,12 +416,14 @@ test('a long reply keeps the questions whole and cuts the prose before them', as
   assert.ok(ev.data.text.endsWith('   - Lint: style\n   - Test: unit'), 'every option survives');
 });
 
-test('switching target records the msgId of its last finished turn', async (t) => {
+test('watching a conductor records the msgId of its last finished turn; watching again keeps the cursor', async (t) => {
   const { host, app } = await setup(t, { events: { 'cond-b': [{ kind: 'assistant_message', msgId: 'old-msg', message: { content: [{ type: 'text', text: 'old' }] } }, { kind: 'turn_end' }] } });
-  await app.deps.service.setTarget('cond-b');
-  assert.equal(app.deps.state.get().lastHandledMsgId, 'old-msg');
-  await app.deps.service.setTarget('cond-a');
-  assert.equal(app.deps.state.get().lastHandledMsgId, null);
+  await app.deps.announcer.watch('cond-b');
+  assert.equal(cursor(app, 'cond-b').lastHandledMsgId, 'old-msg');
+  assert.equal(cursor(app).lastHandledMsgId, null);
+  host.finishTurn('cond-b', 'newer', { notify: false });
+  await app.deps.announcer.watch('cond-b');
+  assert.equal(cursor(app, 'cond-b').lastHandledMsgId, 'old-msg', 'a second watch does not re-baseline');
   assert.equal(mcpReads(host).length, 0);
 });
 
@@ -462,8 +449,8 @@ test('a pending question is announced by an instances frame even though a later 
   assert.match(ev.data.text, /^Two quick things\.\n--- questions ---\n1\. Which database\?.*\n {3}- Postgres \(Recommended\): robust\n {3}- SQLite: tiny: embedded\n2\. Which checks\?.*\n {3}- Lint: style\n {3}- Test: unit$/s);
   await settle(app, sse);
   assert.equal(announces(sse).length, 1, 'the suppressed later turn stays silent on an ask-only trigger');
-  assert.equal(app.deps.state.get().lastHandledTurnSeq, -1, 'the turn cursor is untouched');
-  assert.equal(app.deps.state.get().lastHandledAskId, 'tu1');
+  assert.equal(cursor(app).lastHandledTurnSeq, -1, 'the turn cursor is untouched');
+  assert.equal(cursor(app).lastHandledAskId, 'tu1');
 });
 
 test('the plain path announces the pending ask first, then the later turn, each once', async (t) => {
@@ -474,7 +461,7 @@ test('the plain path announces the pending ask first, then the later turn, each 
   const got = announces(sse);
   assert.deepEqual(got.map((a) => [a.turnSeq, a.ask?.kind ?? null]), [[askEnd._seq, 'question'], [laterEnd._seq, null]]);
   assert.equal(got[1].text, 'worker finished, carrying on');
-  assert.equal(app.deps.state.get().lastHandledTurnSeq, laterEnd._seq);
+  assert.equal(cursor(app).lastHandledTurnSeq, laterEnd._seq);
   // Duplicate triggers of every kind add nothing.
   host.broadcast({ t: 'instances', instances: host.state.instances });
   host.broadcast({ t: 'turn_notification', id: 'cond-a' });
@@ -521,48 +508,120 @@ test('a second ask after the first was announced is announced too', async (t) =>
   assert.equal(announces(sse).length, 2);
 });
 
-test('switching to a conductor already blocked on an ask announces that ask once, but not its old turns', async (t) => {
+test('the first send to a conductor already blocked on an ask announces that ask once, but not its old turns', async (t) => {
   const { host, app, sse } = await setup(t);
   host.finishTurn('cond-b', 'old news', { notify: false });
   const askEnd = host.finishAsk('cond-b', { kind: 'question', questions: QUESTIONS, prose: 'Blocked on you.', notify: false, frames: false });
-  await app.deps.service.setTarget('cond-b');
+  await callTool(app, 'send_to_conductor', { session: 'cond-b', text: 'status?' });
   const ev = await sse.next('announce');
   assert.equal(ev.data.sessionId, 'cond-b');
   assert.equal(ev.data.turnSeq, askEnd._seq);
   assert.deepEqual(ev.data.ask, { kind: 'question', count: 2 });
   assert.match(ev.data.text, /^Blocked on you\.\n--- questions ---/);
-  // Re-picking the same target and every further trigger add nothing.
-  await app.deps.service.setTarget('cond-b');
+  // Sending again and every further trigger add nothing.
+  await callTool(app, 'send_to_conductor', { session: 'cond-b', text: 'again' });
   await app.deps.announcer.reconcileAsk();
   await app.deps.announcer.reconcile();
   await settle(app, sse);
   const all = announces(sse);
   assert.equal(all.length, 1);
-  assert.ok(all.every((a) => !a.text.includes('old news')), 'finished turns are not replayed on a switch');
+  assert.ok(all.every((a) => !a.text.includes('old news')), 'finished turns are not replayed on the first send');
 });
 
-test('an ask that landed on a conductor while another was the target is announced when you switch back to it', async (t) => {
-  const { host, app, sse } = await setup(t);
-  await app.deps.service.setTarget('cond-b');
-  host.finishAsk('cond-a', { kind: 'plan', plan: 'Step 1', planPath: '/plans/a.md', notify: false, frames: false });
-  await app.deps.announcer.reconcile();
-  await settle(app, sse);
-  assert.deepEqual(announces(sse), [], 'not the target: silent');
-  await app.deps.service.setTarget('cond-a');
-  const ev = await sse.next('announce');
-  assert.equal(ev.data.sessionId, 'cond-a');
-  assert.deepEqual(ev.data.ask, { kind: 'plan', planPath: '/plans/a.md' });
-  assert.equal(announces(sse).length, 1);
-});
-
-test('an ask that was answered before the switch is not announced', async (t) => {
+test('an ask answered before a conductor is first acted on is not announced', async (t) => {
   const { host, app, sse } = await setup(t);
   host.finishAsk('cond-b', { kind: 'question', questions: QUESTIONS, notify: false, frames: false });
   host.setRow('cond-b', { awaitingUser: null, awaitingUserSource: null });
-  await app.deps.service.setTarget('cond-b');
+  await app.deps.announcer.watch('cond-b');
   await app.deps.announcer.reconcileAsk();
   await settle(app, sse);
   assert.deepEqual(announces(sse), []);
+});
+
+test('asks pending on two announced conductors are both announced from one instances frame', async (t) => {
+  const { host, app, sse } = await setup(t, { watch: ['cond-a', 'cond-b'] });
+  host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, prose: 'A asks.', notify: false, frames: false });
+  host.finishAsk('cond-b', { kind: 'plan', plan: 'Step 1', planPath: '/plans/b.md', prose: 'B plans.', notify: false, frames: false });
+  host.requests.length = 0;
+  host.broadcast({ t: 'instances', instances: host.state.instances });
+  await sse.next('announce', (d) => d.sessionId === 'cond-a');
+  await sse.next('announce', (d) => d.sessionId === 'cond-b');
+  await settle(app, sse);
+  const got = announces(sse);
+  assert.deepEqual(got.map((a) => [a.sessionId, a.ask.kind]), [['cond-a', 'question'], ['cond-b', 'plan']]);
+  assert.equal(listReads(host), 1, 'one instance-list read serves both conductors');
+});
+
+test('two announced conductors each get their turns announced with their own session id', async (t) => {
+  const { host, app, sse } = await setup(t, { watch: ['cond-a', 'cond-b'] });
+  // A's announcement is held open while both turns finish.
+  let release;
+  const held = new Promise((r) => { release = r; });
+  host.setMcp('get_recent_messages', async (args) => {
+    if (args.sessionId === 's-a') await held;
+    return mcpThrown('unavailable');
+  });
+  t.mock.method(console, 'error', () => {});
+  host.finishTurn('cond-a', 'from alpha');
+  await waitFor(() => host.mcpCalls.some((c) => c.arguments.sessionId === 's-a'), { what: 'A\'s message read to start' });
+  host.finishTurn('cond-b', 'from beta');
+  release();
+  await sse.next('announce', (d) => d.sessionId === 'cond-b');
+  await settle(app, sse);
+  const got = announces(sse);
+  assert.deepEqual(got.map((a) => [a.sessionId, a.text]), [['cond-a', 'from alpha'], ['cond-b', 'from beta']]);
+  assert.equal(got[0].title, 'Alpha plan');
+});
+
+test('parallel first sends to two conductors announce both replies', async (t) => {
+  const { host, app, sse } = await setup(t, { watch: [] });
+  host.onPrompt((msg) => host.finishTurn(msg.id, `reply to ${msg.id}`));
+  const [a, b] = await Promise.all([
+    callTool(app, 'send_to_conductor', { session: 'cond-a', text: 'one' }),
+    callTool(app, 'send_to_conductor', { session: 'cond-b', text: 'two' }),
+  ]);
+  assert.deepEqual([a.ok, b.ok], [true, true]);
+  await sse.next('announce', (d) => d.sessionId === 'cond-a');
+  await sse.next('announce', (d) => d.sessionId === 'cond-b');
+  await settle(app, sse);
+  assert.deepEqual(announces(sse).map((x) => [x.sessionId, x.text]).sort(), [['cond-a', 'reply to cond-a'], ['cond-b', 'reply to cond-b']]);
+});
+
+test('answering a conductor not yet announced starts announcing it without re-announcing the answered question', async (t) => {
+  const { host, app, sse } = await setup(t);
+  host.finishAsk('cond-b', { kind: 'question', questions: QUESTIONS, prose: 'Blocked.', notify: false, frames: false });
+  host.setMcp('answer_question', (args) => mcpOk({ sessionId: args.sessionId, mode: 'plan', sentText: 't' }));
+  // The row still shows the ask while the answer is delivered.
+  const r = await callTool(app, 'answer_conductor_question', { session: 'cond-b', answers: [{ choices: ['1'] }, { choices: ['1'] }] });
+  assert.equal(r.ok, true);
+  assert.ok(cursor(app, 'cond-b'), 'the answered conductor is now announced');
+  host.broadcast({ t: 'instances', instances: host.state.instances });
+  await app.deps.announcer.reconcileAsk();
+  await settle(app, sse);
+  assert.deepEqual(announces(sse), [], 'the answered question is not announced');
+  host.setRow('cond-b', { awaitingUser: null, awaitingUserSource: null });
+  host.finishTurn('cond-b', 'carrying on');
+  const ev = await sse.next('announce');
+  assert.deepEqual([ev.data.sessionId, ev.data.text], ['cond-b', 'carrying on']);
+});
+
+test('a legacy state.json with an active target announces nothing', async (t) => {
+  const host = await startFakeHost({ instances: [CONDUCTOR_A] });
+  const root = await tempDir();
+  await fs.mkdir(path.join(root, '.code-live'), { recursive: true });
+  await fs.writeFile(path.join(root, '.code-live', 'state.json'), JSON.stringify({ activeTargetId: 'cond-a', lastHandledTurnSeq: -1, lastHandledMsgId: null, lastHandledAskId: null }));
+  const app = await startApp({ host, projectsRoot: root });
+  t.after(async () => { await app.stop(); await host.close(); });
+  const sse = sseClient(`${app.url}/api/events`);
+  t.after(() => sse.close());
+  await sse.ready;
+  assert.deepEqual(app.deps.state.get(), { watched: {} });
+  host.finishTurn('cond-a', 'nobody asked for this');
+  await drain(app, sse);
+  assert.deepEqual(announces(sse), []);
+  await callTool(app, 'send_to_conductor', { session: 'cond-a', text: 'now' });
+  assert.deepEqual(Object.keys(app.deps.state.get().watched), ['cond-a']);
+  assert.equal('activeTargetId' in JSON.parse(await fs.readFile(app.deps.state.file, 'utf8')), false, 'the next write drops the legacy fields');
 });
 
 // ---- sub-agent messages ----
@@ -581,7 +640,7 @@ test('a sub-agent message between the question and turn_end does not change the 
   assert.doesNotMatch(ev.data.text, /sub-agent chatter/);
   assert.match(ev.data.text, /^Two quick things\.\n--- questions ---/, 'the host\'s own rendering, so the stale-turn guard accepted it');
   assert.deepEqual(ev.data.ask, { kind: 'question', count: 2 });
-  assert.equal(app.deps.state.get().lastHandledMsgId, 'main-1');
+  assert.equal(cursor(app).lastHandledMsgId, 'main-1');
   assert.ok(!logged.mock.calls.some((c) => /later turn has spoken/.test(String(c.arguments[0]))), 'no stale-turn fallback');
 });
 
@@ -589,12 +648,12 @@ test('a sub-agent turn_end is not a turn of the conductor', async (t) => {
   const { host, app, sse } = await setup(t);
   host.finishTurn('cond-a', 'real turn', { notify: false });
   await app.deps.announcer.reconcile();
-  const handled = app.deps.state.get();
+  const handled = cursor(app);
   host.addEvent('cond-a', { kind: 'turn_end', parentToolUseId: 'toolu_task', isError: false });
   await app.deps.announcer.reconcile();
   await settle(app, sse);
   assert.equal(announces(sse).length, 1);
-  assert.deepEqual(app.deps.state.get(), handled);
+  assert.deepEqual(cursor(app), handled);
 });
 
 // ---- latching ----

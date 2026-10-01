@@ -1,4 +1,4 @@
-// Server-sent events to the page: `target`, `announce`, `host`. Keeps a small
+// Server-sent events to the page: `announce`, `host`. Keeps a small
 // ring so a reconnecting EventSource gets what it missed; a fresh connection
 // gets only the initial state, never old announcements. The resume id is the
 // Last-Event-ID header, or the `lastEventId` query parameter for a page that

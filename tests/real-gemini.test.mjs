@@ -42,7 +42,7 @@ for (const model of MODELS) {
       mintToken: (m, handle) => gemini.mintToken({ modelId: m, resumeHandle: handle }),
       callTool: async (name, args) => {
         toolCalls.push({ name, args });
-        return { ok: true, sessions: [{ sessionId: 'smoke-1', title: 'Smoke test conductor', status: 'idle', active: true }], activeTarget: { sessionId: 'smoke-1', title: 'Smoke test conductor' } };
+        return { ok: true, sessions: [{ sessionId: 'smoke-1', title: 'Smoke test conductor', status: 'idle' }] };
       },
     };
     const events = [];
@@ -65,7 +65,7 @@ for (const model of MODELS) {
 
       // The injected announcement must produce a new spoken turn.
       const mark = events.length;
-      session.sendText('CONDUCTOR UPDATE from "Smoke test conductor":\nAll tests passed.');
+      session.sendText('CONDUCTOR UPDATE from "Smoke test conductor" (session smoke-1):\nAll tests passed.');
       await waitEvent(events, (e) => events.indexOf(e) >= mark && e.type === 'audio', 'audio after the injected update');
       await waitEvent(events, (e) => events.indexOf(e) >= mark && e.type === 'turn_complete', 'a turnComplete after the injected update');
       if (!CONNECT_ONLY.has(model.id)) assert.ok(toolCalls.length >= 1);
