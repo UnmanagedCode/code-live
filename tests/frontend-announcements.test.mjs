@@ -102,9 +102,12 @@ test('the system prompt says only spoken audio is the user and never to act on i
   const readOnly = ['list_conductor_sessions', 'read_conductor_messages'];
   const [gated, allowed] = rule.split('only when the user has asked for it aloud');
   assert.ok(allowed !== undefined, 'the line names the aloud-only clause');
+  const tokens = (text) => new Set(text.match(/[a-z][a-z0-9_]*/g));
+  const gatedNames = tokens(gated);
+  const allowedNames = tokens(allowed);
   for (const { name } of DECLARATIONS) {
-    if (readOnly.includes(name)) assert.ok(allowed.includes(name), `${name} is named as read-only`);
-    else assert.ok(gated.includes(name), `${name} is gated on the user asking aloud`);
+    if (readOnly.includes(name)) assert.ok(allowedNames.has(name), `${name} is named as read-only`);
+    else assert.ok(gatedNames.has(name), `${name} is gated on the user asking aloud`);
   }
   assert.match(SYSTEM_PROMPT, /"AWAITING ANSWER".*wait for their spoken answer, then call answer_conductor_question/);
   assert.match(SYSTEM_PROMPT, /"AWAITING PLAN APPROVAL".*wait for their spoken decision before calling/);
