@@ -5,6 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startFakeHost } from './fakes/fakeHost.mjs';
+import { DECLARATIONS } from '../src/tools.js';
 import { startApp, callTool, req, CONDUCTOR_A, CONDUCTOR_B, WORKER } from './helpers.mjs';
 
 async function setup(t, { instances = [CONDUCTOR_A, CONDUCTOR_B, WORKER], events } = {}) {
@@ -19,6 +20,16 @@ const text = (t) => ({ kind: 'assistant_message', message: { content: [{ type: '
 const toolOnly = { kind: 'assistant_message', message: { content: [{ type: 'tool_use', id: 'x', name: 'Bash', input: {} }] } };
 
 const FIVE = ['send_to_conductor', 'read_conductor_messages', 'answer_conductor_question', 'approve_conductor_plan', 'reject_conductor_plan'];
+
+test('every tool that acts on a conductor declares session as a required string', () => {
+  const byName = Object.fromEntries(DECLARATIONS.map((d) => [d.name, d.parameters]));
+  for (const name of FIVE) {
+    assert.ok(byName[name].required.includes('session'), `${name} requires session`);
+    assert.equal(byName[name].properties.session.type, 'STRING', name);
+  }
+  for (const name of ['list_conductor_sessions', 'create_conductor_session']) assert.equal(byName[name].required, undefined, `${name} takes nothing`);
+  for (const [name, params] of Object.entries(byName)) for (const key of params.required ?? []) assert.ok(key in params.properties, `${name}.${key} is declared`);
+});
 
 test('list returns conductors only with one host call', async (t) => {
   const { host, app } = await setup(t);

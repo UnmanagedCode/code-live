@@ -207,6 +207,40 @@ export function createAnnouncer({ api, link, state, publish, hostMcp }) {
     if (failure) throw failure;
   }
 
+  const eventsOf = async (id) => {
+    const data = await api.getEvents(id);
+    return Array.isArray(data?.events) ? data.events : [];
+  };
+
+  // The id of the newest ask of `kind` in the conductor's events, or null.
+  async function currentAskId(id, kind) {
+    const ev = latestAskEvent(await eventsOf(id), kind);
+    return ev ? askId(ev) : null;
+  }
+
+  // Adds `id` to the announced set with every turn it has finished marked
+  // handled. Events are read unless `seq` is known. With `ask` its current ask
+  // of that kind is marked handled too; that mark is returned (null for none).
+  async function addCursor(id, { seq, ask }) {
+    let handled = seq;
+    let msgId = null;
+    let askHandled = null;
+    if (handled === undefined || ask) {
+      const events = await eventsOf(id);
+      if (handled === undefined) {
+        const newest = newestTurnEnd(events, -Infinity);
+        handled = newest ? newest._seq : -1;
+        if (newest) msgId = lastAssistantMsgId(events, newest._seq);
+      }
+      const askEv = ask ? latestAskEvent(events, ask) : null;
+      if (askEv) askHandled = askId(askEv);
+    }
+    probed.delete(id);
+    const { watched } = state.get();
+    await state.update({ watched: { ...watched, [id]: { lastHandledTurnSeq: handled, lastHandledMsgId: msgId, lastHandledAskId: askHandled } } });
+    return askHandled;
+  }
+
   const announcer = {
     // One conductor, or (without `id`) every announced one from a single list read.
     reconcile: (id) => serialize(async () => {
@@ -262,33 +296,44 @@ export function createAnnouncer({ api, link, state, publish, hostMcp }) {
     // Starts announcing `id` with every turn it has already finished marked
     // handled; a no-op when it is already announced. Pass `seq` when it is known
     // (-1 for a fresh session); otherwise it is read from the events route, and
-    // a failure propagates. `ask` ('question' | 'plan') also marks that
-    // conductor's current ask of the kind handled, for a caller about to answer
-    // it; without it, a question or plan the row still shows as unanswered is
-    // news and is announced once.
-    watch: (id, { seq, ask } = {}) => serialize(async () => {
+    // a failure propagates. A question or plan the row still shows as unanswered
+    // is news and is announced once.
+    watch: (id, { seq } = {}) => serialize(async () => {
       if (cursorOf(id)) return false;
-      let handled = seq;
-      let msgId = null;
-      let askHandled = null;
-      if (handled === undefined || ask) {
-        const data = await api.getEvents(id);
-        const events = Array.isArray(data?.events) ? data.events : [];
-        if (handled === undefined) {
-          const newest = newestTurnEnd(events, -Infinity);
-          handled = newest ? newest._seq : -1;
-          if (newest) msgId = lastAssistantMsgId(events, newest._seq);
-        }
-        const askEv = ask ? latestAskEvent(events, ask) : null;
-        if (askEv) askHandled = askId(askEv);
-      }
-      probed.delete(id);
-      const { watched } = state.get();
-      await state.update({ watched: { ...watched, [id]: { lastHandledTurnSeq: handled, lastHandledMsgId: msgId, lastHandledAskId: askHandled } } });
+      await addCursor(id, { seq });
       return true;
     }).then((added) => {
       if (added) announcer.reconcileLogged({ ask: true });
     }),
+
+    // For a caller about to answer or decide `id`'s pending ask of `kind`
+    // ('question' | 'plan'): marks that ask handled, so the announcer does not
+    // announce the ask being answered while the host still shows it, and
+    // announces the conductor from then on. It applies whether or not the
+    // conductor is already announced. Resolves to an async `undo` for when the
+    // host write fails: it puts the ask back and announces it again.
+    async holdAsk(id, kind) {
+      const held = await serialize(async () => {
+        const existing = cursorOf(id);
+        if (!existing) return { added: true, prev: null, marked: await addCursor(id, { ask: kind }) };
+        const marked = await currentAskId(id, kind);
+        if (marked !== null) {
+          probed.delete(id);
+          await patchCursor(id, { lastHandledAskId: marked });
+        }
+        return { added: false, prev: existing.lastHandledAskId, marked };
+      });
+      if (held.added) announcer.reconcileLogged({ ask: true });
+      return async () => {
+        await serialize(async () => {
+          // A newer announcement of this conductor's ask is not overwritten.
+          if (held.marked === null || cursorOf(id)?.lastHandledAskId !== held.marked) return;
+          probed.delete(id);
+          await patchCursor(id, { lastHandledAskId: held.prev });
+        });
+        announcer.reconcileLogged({ ask: true });
+      };
+    },
   };
 
   if (link) {

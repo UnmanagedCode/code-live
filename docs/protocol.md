@@ -140,6 +140,7 @@ Failures are `{ok:false, code, message}`:
 - The question structure comes from the newest top-level (no `parentToolUseId`) `user_question` event (`GET /api/instances/:id/events`). If none is found, choices pass through to the host unchanged.
 - **Retry:** when the host answers `INVALID_OPTION` with its `offered` labels, the spoken words are resolved once against those labels and the call is repeated once. A second refusal is returned as `INVALID_OPTION` with `question` and `offered`.
 - **Approval:** `confirmed` must be exactly `true`, else `CONFIRMATION_REQUIRED` with no host call at all. The host switches a plan-mode conductor to `bypassPermissions` on approval. Reject keeps plan mode.
+- **Announcements:** the ask being answered or decided is marked handled before the host write, so it is not announced while the host still shows it. A failed write (any error from the host call) undoes the mark and the ask is announced again.
 - Missing trailing answer entries are skipped; extra entries are `ANSWER_COUNT_MISMATCH`.
 - A failed result may add `question` (1-based), `offered` (labels) and, for `ANSWER_COUNT_MISMATCH`, `expected` and `got`.
 
@@ -205,7 +206,7 @@ The page connects to `wss://generativelanguage.googleapis.com/ws/google.ai.gener
 |---|---|
 | `{"realtimeInput":{"audio":{"data":"<b64>","mimeType":"audio/pcm;rate=16000"}}}` | mic chunks (16-bit LE mono) while the mic is not paused |
 | `{"realtimeInput":{"audioStreamEnd":true}}` | `pauseMic()` while live, once per pause |
-| `{"realtimeInput":{"text":"CONDUCTOR UPDATE from \"<title>\":\n<text>"}}` | announcements; does not interrupt current speech |
+| `{"realtimeInput":{"text":"CONDUCTOR UPDATE from \"<title>\" (session <id>):\n<text>[\n<footer>]"}}` | announcements; does not interrupt current speech. `<footer>` is the `AWAITING ANSWER` / `AWAITING PLAN APPROVAL` line, naming the tool and `session <id>`, when `ask` is set. In `<title>` line breaks become spaces and `"` becomes `'`; a plan path in the footer loses its line breaks; a `<text>` line that starts (after optional spaces or tabs) with `CONDUCTOR UPDATE` or `AWAITING ` gets a leading `> `. The transcript shows the title and text unchanged |
 | `{"toolResponse":{"functionResponses":[{"id","name","response":<tool result>}]}}` | after each tool call, unless cancelled; no `scheduling` field |
 
 **Gemini → client:**

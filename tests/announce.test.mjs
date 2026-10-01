@@ -605,6 +605,56 @@ test('answering a conductor not yet announced starts announcing it without re-an
   assert.deepEqual([ev.data.sessionId, ev.data.text], ['cond-b', 'carrying on']);
 });
 
+test('answering an already-announced conductor marks its unreconciled ask handled', async (t) => {
+  const { host, app, sse } = await setup(t);
+  await app.deps.announcer.reconcile(); // flushes the ask reconcile that watching queued
+  // The ask lands with no /ws frame, so nothing has reconciled it when the answer goes out.
+  host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, prose: 'Blocked.', notify: false, frames: false });
+  host.setMcp('answer_question', (args) => mcpOk({ sessionId: args.sessionId, mode: 'plan', sentText: 't' }));
+  const r = await callTool(app, 'answer_conductor_question', { session: 'cond-a', answers: [{ choices: ['1'] }, { choices: ['1'] }] });
+  assert.equal(r.ok, true);
+  host.broadcast({ t: 'instances', instances: host.state.instances });
+  await app.deps.announcer.reconcileAsk();
+  await settle(app, sse);
+  assert.deepEqual(announces(sse), [], 'the row still shows the answered question; it is not announced');
+});
+
+test('a failed host write puts the ask back: the question or plan is announced again', async (t) => {
+  const { host, app, sse } = await setup(t);
+  t.mock.method(console, 'error', () => {});
+  await app.deps.announcer.reconcile(); // flushes the ask reconcile that watching queued
+  host.setMcp('answer_question', () => mcpThrown('kaboom'));
+  host.setMcp('reject_plan', () => mcpThrown('kaboom'));
+  const failed = async (name, args, session) => {
+    const r = await callTool(app, name, { session, ...args });
+    assert.deepEqual([r.ok, r.code], [false, 'HOST_MCP_ERROR'], name);
+  };
+  // An already-announced conductor and one first acted on by the failing call.
+  host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, prose: 'A asks.', notify: false, frames: false });
+  host.finishAsk('cond-b', { kind: 'plan', plan: 'Step 1', planPath: '/plans/b.md', prose: 'B plans.', notify: false, frames: false });
+  await failed('answer_conductor_question', { answers: [{ choices: ['1'] }, { choices: ['1'] }] }, 'cond-a');
+  const a = await sse.next('announce', (d) => d.sessionId === 'cond-a');
+  assert.deepEqual(a.data.ask, { kind: 'question', count: 2 });
+  assert.equal(cursor(app, 'cond-b'), undefined);
+  await failed('reject_conductor_plan', { feedback: 'smaller' }, 'cond-b');
+  const b = await sse.next('announce', (d) => d.sessionId === 'cond-b');
+  assert.deepEqual(b.data.ask, { kind: 'plan', planPath: '/plans/b.md' });
+  assert.ok(cursor(app, 'cond-b'), 'the conductor stays announced');
+  await settle(app, sse);
+  assert.equal(announces(sse).length, 2, 'each ask is announced once');
+});
+
+test('a conductor whose events route 404s while still listed is pruned from the announced set', async (t) => {
+  const { host, app, sse } = await setup(t, { watch: ['cond-a', 'cond-b'] });
+  host.state.eventsGone.add('cond-a');
+  host.broadcast({ t: 'turn_notification', id: 'cond-a' });
+  await waitFor(() => cursor(app, 'cond-a') === undefined, { what: 'the 404ing conductor to be pruned' });
+  assert.ok(host.state.instances.some((i) => i.id === 'cond-a'), 'its row is still listed');
+  assert.deepEqual(Object.keys(app.deps.state.get().watched), ['cond-b'], 'other conductors are kept');
+  host.finishTurn('cond-b', 'still announced');
+  assert.equal((await sse.next('announce')).data.sessionId, 'cond-b');
+});
+
 test('a legacy state.json with an active target announces nothing', async (t) => {
   const host = await startFakeHost({ instances: [CONDUCTOR_A] });
   const root = await tempDir();

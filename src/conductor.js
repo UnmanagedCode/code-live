@@ -70,6 +70,51 @@ export function createConductorService({ api, link, announcer, hostMcp }) {
     }
   }
 
+  // Runs a host write that answers or decides the conductor's pending ask. The
+  // ask is marked handled first, so it is not announced while the host still
+  // shows it; a failed write puts it back so it is announced again.
+  async function withAskHeld(row, kind, write) {
+    const undo = await announcer.holdAsk(row.id, kind);
+    try {
+      return await write();
+    } catch (e) {
+      await undo().catch((e2) => console.error('code-live: restoring the pending ask failed:', e2.message));
+      throw e;
+    }
+  }
+
+  // Sends the answers, retrying once against the labels the host offers.
+  // Returns the answers that were delivered.
+  async function deliverAnswers(sessionId, questions, spoken, first) {
+    let answers = first;
+    try {
+      await hostMcp.answerQuestion(sessionId, answers);
+    } catch (e) {
+      const i = e.detail?.questionIndex;
+      // The host counts questions from 0 and Gemini from 1.
+      if (e.code === 'NOT_MULTISELECT' && Number.isInteger(i)) {
+        throw fail('NOT_MULTISELECT', `Question ${i + 1} takes a single choice, but several were given.`, { question: i + 1 });
+      }
+      if (e.code !== 'INVALID_OPTION' || !Array.isArray(e.detail?.offered) || !Number.isInteger(i)) throw e;
+      // The host's own label list is authoritative: map the spoken words to
+      // it once, then give up and hand the options back.
+      const entry = spoken[i] ?? {};
+      const multi = questions?.[i]?.multiSelect ?? (Array.isArray(entry.choices) && entry.choices.length > 1);
+      const again = remapQuestion(i, entry, e.detail.offered, !!multi);
+      if (again.refusal) throw refusal(again.refusal);
+      answers = answers.map((a, k) => (k === i ? again.answer : a));
+      try {
+        await hostMcp.answerQuestion(sessionId, answers);
+      } catch (e2) {
+        if (e2.code === 'INVALID_OPTION' && Array.isArray(e2.detail?.offered)) {
+          throw fail('INVALID_OPTION', e2.message, { question: i + 1, offered: e2.detail.offered });
+        }
+        throw e2;
+      }
+    }
+    return answers;
+  }
+
   async function decidePlan(row, call, note) {
     const out = await call();
     return { ok: true, sessionId: row.id, title: summarize(row).title, mode: out.mode, delivered: true, note };
@@ -143,35 +188,8 @@ export function createConductorService({ api, link, announcer, hostMcp }) {
       const questions = latestQuestions(await api.getEvents(row.id));
       const mapped = resolveAnswers(questions, spoken);
       if (mapped.refusal) throw refusal(mapped.refusal);
-      let { answers } = mapped;
-      // Every refusal above comes before the first write. The ask being
-      // answered is marked handled, so it is not announced again.
-      await announcer.watch(row.id, { ask: 'question' });
-      try {
-        await hostMcp.answerQuestion(sessionId, answers);
-      } catch (e) {
-        const i = e.detail?.questionIndex;
-        // The host counts questions from 0 and Gemini from 1.
-        if (e.code === 'NOT_MULTISELECT' && Number.isInteger(i)) {
-          throw fail('NOT_MULTISELECT', `Question ${i + 1} takes a single choice, but several were given.`, { question: i + 1 });
-        }
-        if (e.code !== 'INVALID_OPTION' || !Array.isArray(e.detail?.offered) || !Number.isInteger(i)) throw e;
-        // The host's own label list is authoritative: map the spoken words to
-        // it once, then give up and hand the options back.
-        const entry = spoken[i] ?? {};
-        const multi = questions?.[i]?.multiSelect ?? (Array.isArray(entry.choices) && entry.choices.length > 1);
-        const again = remapQuestion(i, entry, e.detail.offered, !!multi);
-        if (again.refusal) throw refusal(again.refusal);
-        answers = answers.map((a, k) => (k === i ? again.answer : a));
-        try {
-          await hostMcp.answerQuestion(sessionId, answers);
-        } catch (e2) {
-          if (e2.code === 'INVALID_OPTION' && Array.isArray(e2.detail?.offered)) {
-            throw fail('INVALID_OPTION', e2.message, { question: i + 1, offered: e2.detail.offered });
-          }
-          throw e2;
-        }
-      }
+      // Every refusal above comes before the first write.
+      const answers = await withAskHeld(row, 'question', () => deliverAnswers(sessionId, questions, spoken, mapped.answers));
       return {
         ok: true,
         sessionId: row.id,
@@ -190,15 +208,13 @@ export function createConductorService({ api, link, announcer, hostMcp }) {
       }
       const row = await resolve(session);
       await requirePendingPlan(row);
-      await announcer.watch(row.id, { ask: 'plan' });
-      return decidePlan(row, () => hostMcp.approvePlan(row.sessionId, feedback), APPROVED_NOTE);
+      return withAskHeld(row, 'plan', () => decidePlan(row, () => hostMcp.approvePlan(row.sessionId, feedback), APPROVED_NOTE));
     },
 
     async reject({ session, feedback }) {
       const row = await resolve(session);
       await requirePendingPlan(row);
-      await announcer.watch(row.id, { ask: 'plan' });
-      return decidePlan(row, () => hostMcp.rejectPlan(row.sessionId, feedback), REJECTED_NOTE);
+      return withAskHeld(row, 'plan', () => decidePlan(row, () => hostMcp.rejectPlan(row.sessionId, feedback), REJECTED_NOTE));
     },
   };
 }
