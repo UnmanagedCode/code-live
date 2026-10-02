@@ -2,13 +2,30 @@
 // {status?, body} to send as JSON, or undefined when it wrote the response
 // itself (SSE). Thrown errors with a `code` become {error, code} responses.
 import { MODELS } from './models.js';
+import { VOICES } from './voices.js';
+import { CUSTOM_PROMPT_MAX } from './prefsStore.js';
 import { callTool } from './tools.js';
 import { HttpError } from './http.js';
 
 export const ROUTES = [
   { method: 'GET', path: '/api/health', handler: () => ({ body: { ok: true } }) },
 
-  { method: 'GET', path: '/api/settings', handler: async ({ deps }) => ({ body: { apiKey: await deps.keyStore.status() } }) },
+  {
+    method: 'GET', path: '/api/settings',
+    handler: async ({ deps }) => ({ body: { apiKey: await deps.keyStore.status(), ...await deps.prefs.get(), customPromptMax: CUSTOM_PROMPT_MAX } }),
+  },
+
+  { method: 'GET', path: '/api/voices', handler: () => ({ body: { voices: VOICES } }) },
+
+  {
+    method: 'PUT', path: '/api/settings/voice', json: true,
+    handler: async ({ body, deps }) => ({ body: await deps.prefs.setVoice(body.voice) }),
+  },
+
+  {
+    method: 'PUT', path: '/api/settings/custom-prompt', json: true,
+    handler: async ({ body, deps }) => ({ body: await deps.prefs.setCustomPrompt(body.customPrompt) }),
+  },
 
   {
     method: 'PUT', path: '/api/settings/api-key', json: true,

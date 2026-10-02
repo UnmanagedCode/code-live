@@ -18,7 +18,7 @@ const CHUNK_SECONDS = 0.1;
 
 const api = createApi();
 const transcript = createTranscript($('transcript'));
-installSettings($('settings'), api);
+const settings = installSettings($('settings'), api);
 const hostIndicator = {
   set(connected) {
     $('host').textContent = connected ? 'Host connected' : 'Host disconnected';
@@ -46,6 +46,7 @@ function onEvent(ev) {
   if (ev.type !== 'state') return;
   $('state').textContent = ev.state;
   $('state').dataset.state = ev.state;
+  settings.setLocked(ev.state === 'connecting' || ev.state === 'live' || ev.state === 'reconnecting');
   micControl.render();
   connectControl.render();
   if (ev.detail) transcript.add(ev.state === 'error' ? 'error' : 'status', ev.detail);

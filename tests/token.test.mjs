@@ -1,13 +1,16 @@
 // Pins: POST /api/token mints a single-use ephemeral token whose locked setup
 // matches each pinned model's verified requirements, with the key sent only
-// in the x-goog-api-key header and upstream errors scrubbed of it.
+// in the x-goog-api-key header and upstream errors scrubbed of it. The saved
+// voice and custom instructions are folded into that setup at every mint
+// (resumes included), and with neither set the setup is unchanged.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MODELS } from '../src/models.js';
 import { DECLARATIONS } from '../src/tools.js';
-import { SYSTEM_PROMPT } from '../src/liveSetup.js';
+import { SYSTEM_PROMPT, CUSTOM_PROMPT_HEADER, composeSystemPrompt } from '../src/liveSetup.js';
 import { startFakeGemini, LIVE_PATH } from './fakes/fakeGemini.mjs';
 import { startApp, req, SENTINEL_KEY } from './helpers.mjs';
+import { promises as fs } from 'node:fs';
 
 const NOW = Date.UTC(2030, 0, 2, 3, 4, 5, 678);
 
@@ -74,6 +77,73 @@ for (const model of MODELS) {
     for (const fn of minted.tools[0].functionDeclarations) assert.equal(fn.parameters.type, 'OBJECT');
   });
 }
+
+const baselineGenerationConfig = (model) => (model.thinkingLevel
+  ? { responseModalities: ['AUDIO'], thinkingConfig: { thinkingLevel: model.thinkingLevel } }
+  : { responseModalities: ['AUDIO'] });
+const setupOf = (gemini) => gemini.requests.at(-1).body.bidiGenerateContentSetup;
+
+test('composeSystemPrompt returns the built-in prompt unchanged for no custom text', () => {
+  for (const none of ['', null, undefined]) assert.equal(composeSystemPrompt(none), SYSTEM_PROMPT);
+});
+
+test('cleared preferences leave the setup identical to the unset baseline', async (t) => {
+  const { gemini, app } = await setup(t);
+  await mint(app, { model: 'gemini-3.8-live' });
+  const baseline = setupOf(gemini);
+  await app.deps.prefs.setVoice('Puck');
+  await app.deps.prefs.setCustomPrompt('Be brief.');
+  await app.deps.prefs.setVoice(null);
+  await app.deps.prefs.setCustomPrompt('');
+  await mint(app, { model: 'gemini-3.8-live' });
+  assert.deepEqual(setupOf(gemini), baseline);
+  assert.ok(!('speechConfig' in setupOf(gemini).generationConfig));
+});
+
+for (const model of MODELS) {
+  test(`a saved voice adds speechConfig to the ${model.id} generationConfig and nothing else`, async (t) => {
+    const { gemini, app } = await setup(t);
+    await app.deps.prefs.setVoice('Puck');
+    assert.equal((await mint(app, { model: model.id })).status, 200);
+    assert.deepEqual(setupOf(gemini).generationConfig, {
+      ...baselineGenerationConfig(model),
+      speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } } },
+    });
+    assert.deepEqual(setupOf(gemini).systemInstruction, { parts: [{ text: SYSTEM_PROMPT }] });
+  });
+}
+
+test('saved custom instructions follow the built-in prompt under the header', async (t) => {
+  const { gemini, app } = await setup(t);
+  await app.deps.prefs.setCustomPrompt('Keep every reply to one short sentence.');
+  await mint(app, { model: 'gemini-3.8-live' });
+  const text = setupOf(gemini).systemInstruction.parts[0].text;
+  assert.equal(text, composeSystemPrompt('Keep every reply to one short sentence.'));
+  assert.ok(text.startsWith(`${SYSTEM_PROMPT}\n\n${CUSTOM_PROMPT_HEADER}\n`));
+  assert.ok(text.endsWith('Keep every reply to one short sentence.'));
+  assert.ok(!('speechConfig' in setupOf(gemini).generationConfig));
+});
+
+test('a resume mint carries the saved voice and instructions', async (t) => {
+  const { gemini, app } = await setup(t);
+  await app.deps.prefs.setVoice('Kore');
+  await app.deps.prefs.setCustomPrompt('Be brief.');
+  await mint(app, { model: 'gemini-3.8-live', resumeHandle: 'Handle_abc-123' });
+  const sent = setupOf(gemini);
+  assert.deepEqual(sent.sessionResumption, { handle: 'Handle_abc-123' });
+  assert.equal(sent.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName, 'Kore');
+  assert.equal(sent.systemInstruction.parts[0].text, composeSystemPrompt('Be brief.'));
+});
+
+test('a corrupt preferences.json fails the mint with 500 STORE_CORRUPT and sends nothing to Gemini', async (t) => {
+  const { gemini, app } = await setup(t);
+  await app.deps.prefs.setVoice('Kore');
+  await fs.writeFile(app.deps.prefs.file, '{"voice":"Nope"}');
+  const r = await mint(app, { model: 'gemini-3.8-live' });
+  assert.equal(r.status, 500);
+  assert.equal(r.json.code, 'STORE_CORRUPT');
+  assert.equal(gemini.requests.length, 0);
+});
 
 test('a resume handle lands in sessionResumption.handle', async (t) => {
   const { gemini, app } = await setup(t);

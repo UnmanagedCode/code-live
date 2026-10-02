@@ -1,7 +1,9 @@
 // Pins: public/styles.css is dark-only, declares code-conductor's shell token
 // names on :root, references no custom property it doesn't declare there, and
 // renders disabled buttons like the host: emphasized ones swap to its
-// panel-2/muted look, and every one fades with a not-allowed cursor.
+// panel-2/muted look, and every one fades with a not-allowed cursor. The
+// textarea is styled like the other fields, and a disabled select or textarea
+// fades the same way.
 // Reads the stylesheet as text: happy-dom doesn't resolve cascaded custom
 // properties reliably.
 import { test } from 'node:test';
@@ -56,6 +58,24 @@ test("disabled emphasized buttons swap to the host's panel-2/muted look", () => 
 test("disabled buttons fade like the host's generic button:disabled", () => {
   const decls = declarationsOf('button:disabled');
   assert.ok(decls, 'styles.css has no button:disabled rule');
+  assert.equal(decls.opacity, '.5');
+  assert.equal(decls.cursor, 'not-allowed');
+});
+
+test('textarea is styled like the other fields and shares their focus ring', () => {
+  const decls = declarationsOf('select, input, textarea');
+  assert.ok(decls, 'styles.css has no select, input, textarea rule');
+  assert.equal(decls.background, 'var(--panel-2)');
+  assert.equal(decls.color, 'var(--text)');
+  assert.equal(decls.border, '1px solid var(--border)');
+  const focus = declarationsOf('input:focus, select:focus, textarea:focus, button:focus-visible');
+  assert.ok(focus, 'the focus rule does not include textarea:focus');
+  assert.equal(focus.outline, '2px solid var(--accent)');
+});
+
+test('a disabled select or textarea fades like a disabled button', () => {
+  const decls = declarationsOf('select:disabled, textarea:disabled');
+  assert.ok(decls, 'styles.css has no select:disabled, textarea:disabled rule');
   assert.equal(decls.opacity, '.5');
   assert.equal(decls.cursor, 'not-allowed');
 });

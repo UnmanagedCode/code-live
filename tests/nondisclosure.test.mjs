@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { readdirSync } from 'node:fs';
 import { ROUTES } from '../src/routes.js';
+import { CUSTOM_PROMPT_MAX } from '../src/prefsStore.js';
 import { startFakeGemini } from './fakes/fakeGemini.mjs';
 import { startFakeHost } from './fakes/fakeHost.mjs';
 import { startApp, req, SENTINEL_KEY, CONDUCTOR_A, WORKER } from './helpers.mjs';
@@ -36,9 +37,20 @@ test('the stored key never appears in any response', async (t) => {
     'GET /api/health': () => [req(u('/api/health'))],
     'GET /api/settings': async () => {
       const r = await req(u('/api/settings'));
-      assert.deepEqual(r.json, { apiKey: { set: true, tail: 'cdef' } });
+      assert.deepEqual(r.json, { apiKey: { set: true, tail: 'cdef' }, voice: null, customPrompt: '', customPromptMax: CUSTOM_PROMPT_MAX });
       return [r];
     },
+    'GET /api/voices': () => [req(u('/api/voices'))],
+    'PUT /api/settings/voice': async () => [
+      await req(u('/api/settings/voice'), { method: 'PUT', body: { voice: 'Puck' } }),
+      await req(u('/api/settings/voice'), { method: 'PUT', body: { voice: `bad ${SENTINEL_KEY}` } }),
+      await req(u('/api/settings/voice'), { method: 'PUT', body: { voice: null } }),
+    ],
+    'PUT /api/settings/custom-prompt': async () => [
+      await req(u('/api/settings/custom-prompt'), { method: 'PUT', body: { customPrompt: 'Be brief.' } }),
+      await req(u('/api/settings/custom-prompt'), { method: 'PUT', body: { customPrompt: 'x'.repeat(CUSTOM_PROMPT_MAX + 1) } }),
+      await req(u('/api/settings/custom-prompt'), { method: 'PUT', body: { customPrompt: '' } }),
+    ],
     'PUT /api/settings/api-key': async () => [
       await setKey(),
       await req(u('/api/settings/api-key'), { method: 'PUT', body: { apiKey: `bad ${SENTINEL_KEY}` } }),

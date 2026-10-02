@@ -34,7 +34,7 @@ function scrub(text, key) {
   return out;
 }
 
-export function createGemini({ base, wsUrl, keyStore, now = () => Date.now(), fetchImpl = fetch }) {
+export function createGemini({ base, wsUrl, keyStore, prefsStore, now = () => Date.now(), fetchImpl = fetch }) {
   return {
     async mintToken({ modelId, resumeHandle } = {}) {
       if (typeof modelId !== 'string' || !getModel(modelId)) throw err('UNKNOWN_MODEL', 400, `unknown model: ${String(modelId)}`);
@@ -44,13 +44,15 @@ export function createGemini({ base, wsUrl, keyStore, now = () => Date.now(), fe
       const key = await keyStore.get();
       if (!key) throw err('NO_API_KEY', 409, 'No Gemini API key is set; add one in Settings');
 
+      const prefs = await prefsStore.get();
+
       const t = now();
       const expireTime = iso(t + EXPIRE_MS);
       const body = {
         uses: 1,
         expireTime,
         newSessionExpireTime: iso(t + NEW_SESSION_MS),
-        bidiGenerateContentSetup: buildSetup(modelId, resumeHandle || undefined),
+        bidiGenerateContentSetup: buildSetup(modelId, resumeHandle || undefined, prefs),
       };
       let res, data;
       try {
