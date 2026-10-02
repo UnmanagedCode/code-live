@@ -2,6 +2,7 @@
 // model's default) and the custom instructions appended to the system prompt.
 // get() reads the file on every call, and every token mint calls it, so a saved
 // change applies from the next mint.
+import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { writeFileAtomic, readJson } from './atomicFile.js';
 import { isVoice } from './voices.js';
@@ -30,7 +31,11 @@ export function createPrefsStore({ dir, write = writeFileAtomic }) {
 
   async function get() {
     const data = await readJson(file);
-    if (data === null) return { voice: null, customPrompt: '' };
+    if (data === null) {
+      // readJson gives null for an absent file and for a file holding the JSON literal null.
+      if (await fs.stat(file).then(() => true, (e) => { if (e.code === 'ENOENT') return false; throw e; })) throw corrupt();
+      return { voice: null, customPrompt: '' };
+    }
     if (typeof data !== 'object' || Array.isArray(data)) throw corrupt();
     const voice = data.voice ?? null;
     if (voice !== null && !isVoice(voice)) throw corrupt();

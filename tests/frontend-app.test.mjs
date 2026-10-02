@@ -529,6 +529,27 @@ test('the voice, instructions and their Save are locked while a session runs and
   assert.deepEqual(controls(), [false, false, false]);
 });
 
+test('the voice, instructions and their Save are locked while connecting and while reconnecting, not only while live', async () => {
+  // Pins: the lock covers every state in which a token is minted for a running session.
+  const controls = () => ['settings-voice', 'settings-prompt', 'settings-prompt-save'].map((id) => $(id).disabled);
+  let release = holdTokenMint();
+  $('connect').click();
+  await waitFor(() => $('state').textContent === 'connecting', { what: 'state connecting' });
+  assert.deepEqual(controls(), [true, true, true], 'locked while connecting');
+  release();
+  await waitFor(() => $('state').textContent === 'live', { what: 'state live' });
+  const socket = await gemini.session(gemini.sessions.length - 1);
+
+  release = holdTokenMint(); // holds the resume's token request, so the page stays reconnecting
+  socket.send({ sessionResumptionUpdate: { newHandle: 'h1', resumable: true } });
+  socket.send({ goAway: { timeLeft: '5s' } });
+  await waitFor(() => $('state').textContent === 'reconnecting', { what: 'state reconnecting' });
+  assert.deepEqual(controls(), [true, true, true], 'locked while reconnecting');
+  release();
+  await waitFor(() => $('state').textContent === 'live', { what: 'state live after resume' });
+  assert.deepEqual(controls(), [true, true, true], 'locked while live again');
+});
+
 test('the saved voice and instructions reach the next minted setup', async (t) => {
   t.after(async () => { await app.deps.prefs.setVoice(null); await app.deps.prefs.setCustomPrompt(''); });
   const voice = $('settings-voice');

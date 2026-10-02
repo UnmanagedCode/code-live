@@ -63,7 +63,7 @@ test('a malformed file is STORE_CORRUPT', async (t) => {
   const { dir, store } = await setup(t);
   await fs.mkdir(dir, { recursive: true });
   const bad = [
-    '{not json', '[]', '"x"',
+    '{not json', '[]', '"x"', 'null',
     JSON.stringify({ voice: 5 }), JSON.stringify({ voice: 'Nope' }), JSON.stringify({ voice: 'kore' }),
     JSON.stringify({ customPrompt: 7 }), JSON.stringify({ customPrompt: 'a'.repeat(CUSTOM_PROMPT_MAX + 1) }),
     JSON.stringify({ customPrompt: 'a\u0007' }),
