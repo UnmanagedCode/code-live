@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from './src/config.js';
 import { createKeyStore } from './src/keyStore.js';
+import { createPrefsStore } from './src/prefsStore.js';
 import { createStateStore } from './src/stateStore.js';
 import { createGemini } from './src/gemini.js';
 import { createCcApi } from './src/ccApi.js';
@@ -20,13 +21,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
 const STATUS_BY_CODE = {
-  INVALID_KEY: 400, INVALID_ARGS: 400, UNKNOWN_MODEL: 400, NO_API_KEY: 409,
+  INVALID_KEY: 400, INVALID_ARGS: 400, UNKNOWN_MODEL: 400, UNKNOWN_VOICE: 400, INVALID_PROMPT: 400, NO_API_KEY: 409,
   GEMINI_ERROR: 502, HOST_UNAVAILABLE: 502, HOST_HTTP_ERROR: 502, STORE_CORRUPT: 500,
 };
 
 // `opts` injects test seams: fetch, WebSocket, clock and link timings.
 export async function buildDeps(config, opts = {}) {
   const keyStore = createKeyStore({ dir: config.dataDir });
+  const prefs = createPrefsStore({ dir: config.dataDir });
   const state = createStateStore({ dir: config.dataDir });
   await state.load();
   const headers = securityHeaders(config.geminiWsUrl);
@@ -37,10 +39,10 @@ export async function buildDeps(config, opts = {}) {
   const hostMcp = createHostMcp({ baseUrl: config.conductorUrl, ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}) });
   const announcer = createAnnouncer({ api, link, state, publish, hostMcp });
   const service = createConductorService({ api, link, announcer, hostMcp });
-  const gemini = createGemini({ base: config.geminiBase, wsUrl: config.geminiWsUrl, keyStore, ...(opts.now ? { now: opts.now } : {}) });
+  const gemini = createGemini({ base: config.geminiBase, wsUrl: config.geminiWsUrl, keyStore, prefsStore: prefs, ...(opts.now ? { now: opts.now } : {}) });
   link.on('open', () => publish('host', { connected: true }));
   link.on('close', () => publish('host', { connected: false }));
-  return { config, headers, keyStore, state, sse, api, hostMcp, link, announcer, service, gemini, staticFiles: await loadStaticFiles(PUBLIC_DIR) };
+  return { config, headers, keyStore, prefs, state, sse, api, hostMcp, link, announcer, service, gemini, staticFiles: await loadStaticFiles(PUBLIC_DIR) };
 }
 
 export function createServer(deps) {

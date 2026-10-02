@@ -25,11 +25,13 @@ browser (Code Live page)                       code-live backend (node:http)    
 | `src/config.js` | `loadConfig(env)`: env → config; throws on a missing `PROJECTS_ROOT` / `CONDUCTOR_URL`; derives `dataDir`, `geminiWsUrl` and `hostWsUrl` |
 | `src/atomicFile.js` | `writeFileAtomic` (0600 temp file + rename + chmod, directory 0700) and `readJson` (`null` if absent, `STORE_CORRUPT` if unparseable) |
 | `src/keyStore.js` | `secrets.json`: `get` (the only key accessor, used only by `gemini.js`), `status`, `set` (validation), `clear` |
+| `src/voices.js` | `VOICES` (the prebuilt Gemini voices, `{name, style}`) and `isVoice` (exact, case-sensitive); read by `prefsStore.js` and `GET /api/voices` |
+| `src/prefsStore.js` | `preferences.json`: `get` (reads the file on every call), `setVoice`, `setCustomPrompt` (validate first, then a serialized read-merge-write, so concurrent saves both land); `CUSTOM_PROMPT_MAX` |
 | `src/stateStore.js` | `state.json`: `{watched:{<instanceId>:{lastHandledTurnSeq, lastHandledMsgId, lastHandledAskId}}}`; writes are serialized, so the file ends at the last `update` |
 | `src/models.js` | `MODELS`, the pinned catalog with per-model `thinkingLevel` / `toolBehavior` and the optional picker `hint`; `getModel` |
 | `src/tools.js` | `DECLARATIONS` (the single source for the Gemini setup and the dispatcher), `toolDeclarations(model)`, and `callTool` (validation + dispatch; never throws) |
-| `src/liveSetup.js` | `SYSTEM_PROMPT`, `buildSetup(modelId, resumeHandle)` |
-| `src/gemini.js` | `mintToken`: the auth_tokens call, expiry timestamps, and error scrubbing (any 8+ character run copied from the key) |
+| `src/liveSetup.js` | `SYSTEM_PROMPT`, `CUSTOM_PROMPT_HEADER`, `composeSystemPrompt(customPrompt)`, `buildSetup(modelId, resumeHandle, {voice, customPrompt})` |
+| `src/gemini.js` | `mintToken`: reads the preferences at every mint (so a resume does too), the auth_tokens call, expiry timestamps, and error scrubbing (any 8+ character run copied from the key) |
 | `src/ccApi.js` | host REST client; 404 → `SESSION_GONE`, other non-2xx → `HOST_HTTP_ERROR`, network/timeout → `HOST_UNAVAILABLE` |
 | `src/ccLink.js` | host `/ws` client: reconnect/backoff, reqId→ack pairing, and `turn_notification` / `instances` / `open` / `close` events |
 | `src/hostMcp.js` | the only module that calls the host's bare `POST /mcp` (unsanctioned, outside the plugin API): `recentMessages`, `answerQuestion`, `approvePlan`, `rejectPlan`, and `pairMessages`. Errors carry `code` and `detail` (see [protocol](protocol.md#mcp-tools)) |
@@ -43,7 +45,7 @@ browser (Code Live page)                       code-live backend (node:http)    
 
 | frontend file | responsibility |
 |---|---|
-| `public/app.js` | wiring only: builds the modules, connects the buttons, reflects session state, runs the mic (AudioWorklet → 100 ms chunks → 16 kHz PCM16 base64, frames discarded while the mic is paused) and playback |
+| `public/app.js` | wiring only: builds the modules, connects the buttons, reflects session state (and locks the Settings voice and instructions controls while `connecting`, `live` or `reconnecting`), runs the mic (AudioWorklet → 100 ms chunks → 16 kHz PCM16 base64, frames discarded while the mic is paused) and playback |
 | `public/liveSession.js` | DOM-free Gemini Live client: states, message → event mapping, tool round-trip, cancellation, reconnect (`reconnect()`), the mic pause flag (`pauseMic`/`resumeMic`/`micPaused`, kept across `live ⇄ reconnecting`, cleared on any other state), the bounded `setupComplete` wait (`setupTimeoutMs`, injectable `timers`), the spacing of resume attempts (`resumeDelayMs`, doubling, up to `maxResumeFailures`; a Disconnect during the wait ends the loop), and `disconnect()` from any state |
 | `public/connectControl.js` | the single Connect / Connecting... / Disconnect button, rendered from `session.state`; disabled while `connecting` |
 | `public/micControl.js` | Pause/Resume mic button and `Mic paused` pill, rendered from `session.state` + `session.micPaused` |
@@ -51,7 +53,7 @@ browser (Code Live page)                       code-live backend (node:http)    
 | `public/api.js` | backend client (relative URLs, `cache:'no-store'`); the token request alone carries a timeout (`TOKEN_TIMEOUT_MS`, injectable as `tokenTimeoutMs`), after which it rejects with `No response from the backend within <n> s` |
 | `public/styles.css` | the page's only stylesheet, dark-only. Its `:root` tokens are copied from the `:root` block of code-conductor's shell `public/styles.css`, because the host provides no theme to the plugin iframe |
 | `public/transcript.js` | transcript rendering, merging streamed transcription chunks, `divider(text)` |
-| `public/settings.js` | the Settings pane |
+| `public/settings.js` | the Settings pane: the key, the voice select (saves on `change`) and the custom-instructions textarea with Save. `installSettings` returns `{ready, setLocked}`; `setLocked` disables the voice and instructions controls, not the key's |
 | `public/events.js` | `createEventStream`: an EventSource wrapper for `api/events` (same `addEventListener` surface). A native source stops for good when a reconnect gets a non-2xx reply, so on an `error` with `readyState` CLOSED it creates a new source after `retryMs` (doubling to `maxRetryMs`, reset on `open`; injectable `timers`), re-attaches every registered listener and passes the last non-empty event id as `?lastEventId=`. An `error` while CONNECTING is left to the native retry |
 | `public/announcements.js` | SSE → transcript and `sendText`; `ANNOUNCE_PREFIX`, `ASK_QUESTION_MARK`, `ASK_PLAN_MARK` and the footer line for an `ask`. Conductor-written title, text and plan path are made inert before they enter the injected header, body or footer (see [protocol](protocol.md#live-socket); look-alike letters and markdown-decorated markers are accepted residual risk) |
 | `public/audio.js`, `public/player.js`, `public/mic-worklet.js` | PCM conversion, `createChunker` (100 ms chunk buffering), gapless 24 kHz playback, the `pcm-capture` worklet |
@@ -64,12 +66,14 @@ Everything lives under `$PROJECTS_ROOT/.code-live/` (directory mode 0700). The p
 | file | contents | mode |
 |---|---|---|
 | `secrets.json` | `{"geminiApiKey":"…"}` | 0600 |
+| `preferences.json` | `{"voice":string\|null, "customPrompt":string}` | 0600 |
 | `state.json` | `{"watched":{"<instanceId>":{"lastHandledTurnSeq":number, "lastHandledMsgId":string\|null, "lastHandledAskId":string\|null}}}` | 0600 |
 
-- Both files are written atomically: a temp file `.<name>.<pid>.<n>.tmp`, then a rename.
+- Every file is written atomically: a temp file `.<name>.<pid>.<n>.tmp`, then a rename.
 - An entry without `lastHandledMsgId` or `lastHandledAskId` loads it as `null`. A `watched` that is not an object, an entry that is not an object or lacks a numeric `lastHandledTurnSeq`, and a non-string id are `STORE_CORRUPT`.
 - Fields outside `watched` (a single-target `state.json` has `activeTargetId` and flat `lastHandled*` fields) are ignored whatever their type, so such a file loads as `{watched:{}}` and the next write drops them. Lookups use `Object.hasOwn`.
 - A malformed file throws `STORE_CORRUPT`; it is never treated as empty.
+- `preferences.json` is `STORE_CORRUPT` when it is not an object, its `voice` is neither `null` nor a `VOICES` name, or its `customPrompt` is not a string or fails the input validation (length, control characters). A missing field takes its default (`null`, `''`). A token mint then fails with `500 STORE_CORRUPT`; recover by deleting the file.
 - The backend fails to start if `state.json` is corrupt.
 
 ## Host link (`ccLink`)
@@ -129,7 +133,7 @@ Duplicate triggers therefore never double-announce, and a turn missed during a d
 **Keep-alive:**
 - `frontend.keepAlive` in `conductor.plugin.json` gives the page its own resident frame in code-conductor, so the page can outlive many backend restarts.
 - The Gemini Live socket goes browser → Gemini, so a backend restart doesn't touch a running call.
-- What does depend on the backend reconnects: the event stream (`public/events.js`), Gemini resumes (`resumeDelayMs` spacing in `public/liveSession.js`), and tool calls (`CLIENT_ERROR` to Gemini while the backend is down). The announced set with its cursors, and the key, are persisted (`state.json`, `secrets.json`).
+- What does depend on the backend reconnects: the event stream (`public/events.js`), Gemini resumes (`resumeDelayMs` spacing in `public/liveSession.js`), and tool calls (`CLIENT_ERROR` to Gemini while the backend is down). The announced set with its cursors, the key and the preferences are persisted (`state.json`, `secrets.json`, `preferences.json`).
 
 ## Security
 
@@ -153,8 +157,8 @@ Run with `npm test`, which is `node tests/run.mjs`: the `node:test` runner drive
 - **Harness:** `tests/helpers.mjs`' `startApp()` builds a real server through `buildDeps` with a fresh temp `PROJECTS_ROOT` and short link timings. It also provides an SSE client and `SENTINEL_KEY`; tests use only that sentinel key.
 - **Frontend:** `tests/dom.mjs` installs happy-dom globals and imports the real `public/` modules.
 - **Waits:** tests wait on observable outcomes (an SSE event, a received frame, a published marker), never on fixed sleeps.
-- **Style guard:** `tests/frontend-styles.test.mjs` reads `public/styles.css` as text and checks it has no `prefers-color-scheme` query, declares `color-scheme: dark` and the host's token names on `:root`, uses no `var(--…)` that `:root` doesn't declare, and pins code-conductor's disabled-button rendering: the `button:disabled` fade and the `button:not(.secondary):disabled` swap, copied from the host's generic `button:disabled` and primary-button `:disabled` rules.
+- **Style guard:** `tests/frontend-styles.test.mjs` reads `public/styles.css` as text and checks it has no `prefers-color-scheme` query, declares `color-scheme: dark` and the host's token names on `:root`, uses no `var(--…)` that `:root` doesn't declare, and pins code-conductor's disabled-button rendering: the `button:disabled` fade and the `button:not(.secondary):disabled` swap, copied from the host's generic `button:disabled` and primary-button `:disabled` rules. It also checks that `textarea` shares the field and focus styling and that a disabled select or textarea fades like a disabled button.
 - **Coverage guard:** `tests/nondisclosure.test.mjs` compares its probe list against `ROUTES`, so a new route fails until it is checked for key leaks.
 - **Real smoke tests:**
-  - `tests/real-gemini.test.mjs` is skipped unless `RUN_REAL_GEMINI=1`, and reads the key from `GEMINI_API_KEY`. Models in its `CONNECT_ONLY` set skip the tool-call step (see the README's known limitations).
+  - `tests/real-gemini.test.mjs` is skipped unless `RUN_REAL_GEMINI=1`, and reads the key from `GEMINI_API_KEY`. Models in its `CONNECT_ONLY` set skip the tool-call step (see the README's known limitations). Every model's token carries a non-default voice and custom instructions.
   - `tests/real-host.test.mjs` is skipped unless `RUN_REAL_HOST=1`. It takes `CONDUCTOR_URL` and `REAL_HOST_SESSION` and makes read-only `/mcp` calls.

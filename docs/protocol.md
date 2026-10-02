@@ -25,7 +25,10 @@ The route table is `ROUTES` in `src/routes.js`.
 | method | path | request | response |
 |---|---|---|---|
 | GET | `/api/health` | none | `{ok:true}`; the host's readiness probe |
-| GET | `/api/settings` | none | `{apiKey:{set:boolean, tail:string\|null}}` (tail = last 4 chars) |
+| GET | `/api/settings` | none | `{apiKey:{set:boolean, tail:string\|null}, voice:string\|null, customPrompt:string, customPromptMax:number}` (tail = last 4 chars; `customPromptMax` is `CUSTOM_PROMPT_MAX` in `src/prefsStore.js`) |
+| GET | `/api/voices` | none | `{voices:[{name, style}]}` (`VOICES` in `src/voices.js`) |
+| PUT | `/api/settings/voice` | `{voice:string\|null}` | `{voice, customPrompt}`. `null` is the model's default. `400 UNKNOWN_VOICE` unless it is exactly a `VOICES` name |
+| PUT | `/api/settings/custom-prompt` | `{customPrompt:string}` | `{voice, customPrompt}` with the text stored: line endings turned into `\n` and trimmed. `400 INVALID_PROMPT` when it is not a string, is longer than `CUSTOM_PROMPT_MAX` after that, or contains a control character (anything below U+0020 except `\t` and `\n`, and U+007F) | 
 | PUT | `/api/settings/api-key` | `{apiKey:string}` | `{apiKey:{set,tail}}`. `400 INVALID_KEY` unless it is 20–512 printable non-space ASCII characters after trimming (the message never echoes the value) |
 | DELETE | `/api/settings/api-key` | none | `{apiKey:{set:false, tail:null}}` |
 | GET | `/api/models` | none | `{models:[{id, label, hint?}]}`; `hint` is present only for models that have one in `MODELS` |
@@ -41,7 +44,7 @@ The route table is `ROUTES` in `src/routes.js`.
 | 400 | `INVALID_ARGS` | `resumeHandle` fails `/^[A-Za-z0-9_-]{1,256}$/` |
 | 409 | `NO_API_KEY` | no key stored |
 | 502 | `GEMINI_ERROR` | the mint failed; the message is `Gemini token mint failed (<status>): <upstream error.message>`. Any run of 8+ characters copied from the key is replaced with `[redacted]`. Upstream headers and body are never forwarded |
-| 500 | `STORE_CORRUPT` | `secrets.json` is unreadable JSON or lacks `geminiApiKey` |
+| 500 | `STORE_CORRUPT` | `secrets.json` is unreadable JSON or lacks `geminiApiKey`, or `preferences.json` is malformed (see [architecture](architecture.md#on-disk-state)) |
 
 ## SSE: `GET /api/events`
 
@@ -182,8 +185,9 @@ The reply is `{result:{content:[{type:"text",text}…], isError?}}` or `{error:{
  "newSessionExpireTime":"<now+60 s>",
  "bidiGenerateContentSetup":{
    "model":"models/<id>",
-   "generationConfig":{"responseModalities":["AUDIO"], "thinkingConfig":{"thinkingLevel":"low"}},
-   "systemInstruction":{"parts":[{"text":"<SYSTEM_PROMPT>"}]},
+   "generationConfig":{"responseModalities":["AUDIO"], "thinkingConfig":{"thinkingLevel":"low"},
+     "speechConfig":{"voiceConfig":{"prebuiltVoiceConfig":{"voiceName":"<voice>"}}}},
+   "systemInstruction":{"parts":[{"text":"<SYSTEM_PROMPT, then any custom instructions>"}]},
    "tools":[{"functionDeclarations":[…DECLARATIONS…]}],
    "inputAudioTranscription":{}, "outputAudioTranscription":{},
    "sessionResumption":{} ,
@@ -192,7 +196,9 @@ The reply is `{result:{content:[{type:"text",text}…], isError?}}` or `{error:{
 
 - `thinkingConfig` is present only for models with a `thinkingLevel` in `src/models.js`.
 - `sessionResumption` is `{"handle":"<h>"}` when resuming.
-- `SYSTEM_PROMPT` is in `src/liveSetup.js`.
+- `speechConfig` is present only when a voice is saved. Its path under `generationConfig` is from the [Live API reference](https://ai.google.dev/api/live).
+- The `systemInstruction` text is `composeSystemPrompt(customPrompt)` from `src/liveSetup.js`: `SYSTEM_PROMPT` alone with no custom instructions, otherwise `SYSTEM_PROMPT`, a blank line, `CUSTOM_PROMPT_HEADER`, a newline and the text. `SYSTEM_PROMPT` is in the same file.
+- The voice and custom instructions are read from `preferences.json` at every mint, resumes included.
 - The response is `{"name":"auth_tokens/…"}`, and `name` is the token.
 - The token's setup is authoritative: the client's own setup is ignored.
 

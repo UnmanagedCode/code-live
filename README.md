@@ -27,13 +27,20 @@ curl -X POST $CC/api/plugins/code-live/version -H 'content-type: application/jso
 
 The UI equivalent is **Settings → Plugins → Rescan / Enable**. Then open **Code Live** in cc's nav.
 
-## Configure the Gemini key
+## Configure
 
-Open **Settings** at the bottom of the Code Live page, paste a Gemini API key, and press **Save**.
+Open **Settings** at the bottom of the Code Live page.
+
+- **Gemini key:** paste it and press **Save**.
+- **Voice:** a prebuilt Gemini voice, or `Default` for the model's own. Only voice names are listed; preview them in Google AI Studio.
+- **Custom instructions:** text appended after code-live's built-in system prompt, under a header that says the built-in rules take precedence. Saving empty text clears it. The length bound is `CUSTOM_PROMPT_MAX` in `src/prefsStore.js`.
+- Voice and instructions are stored in `$PROJECTS_ROOT/.code-live/preferences.json` and composed into the token's locked setup when it is minted. They apply from the next Connect, and the controls are locked while connected.
+
+The key:
 
 - It is stored at `$PROJECTS_ROOT/.code-live/secrets.json` (file mode `0600`, directory `0700`, written atomically).
 - The page never receives it back. Only `Key set (••••<last 4>)` is shown.
-- The browser gets a single-use **ephemeral token** per connection, minted by the backend. The token locks the model, tools and system prompt, so the page cannot change them.
+- The browser gets a single-use **ephemeral token** per connection, minted by the backend. The token locks the model, voice, tools and system prompt, so the page cannot change them.
 
 ## Pinned models
 
@@ -95,6 +102,8 @@ The backend exits with an error if `PROJECTS_ROOT` or `CONDUCTOR_URL` is missing
 
 ## Known limitations
 
+- **Voice and instructions are read at every token mint, including the automatic resume (about every 10 minutes).** The page locks the controls during a call, but a change made from another tab or through the API during a call applies at that call's next resume.
+- **The built-in rules' precedence over custom instructions is prompt guidance, not enforced.** The header tells the model they take precedence and never count as your spoken consent.
 - The microphone needs a secure context: `http://localhost`, `http://127.0.0.1` or `https`.
 - **code-live calls the host's bare `POST /mcp`** for announcement text, `read_conductor_messages`, and answering or deciding plans. That is not part of the plugin API, so a host change can break it without any manifest-level signal. Announcements and reads then fall back to the events text (logged, as they also do when a later turn has already spoken); answering and deciding fail with `HOST_*` codes. All of it is in `src/hostMcp.js`, so moving to a sanctioned host-tool path touches that module and the manifest only.
 - Plan approval requires `confirmed: true`, which the system prompt allows only after the user's spoken yes. That guards against a misheard utterance; it is not a security boundary. Conductor-written text reaches Gemini's conversation and could itself prompt an approval, but that grants nothing a conductor cannot already do through the open host API. The same holds for the system prompt's rule that only spoken audio is the user and that Gemini never acts on its own: it is prompt guidance, and nothing checks a tool call against your speech.

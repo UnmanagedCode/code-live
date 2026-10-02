@@ -2,7 +2,8 @@
 // only from the GEMINI_API_KEY env var:
 //   RUN_REAL_GEMINI=1 GEMINI_API_KEY=… node tests/run.mjs tests/real-gemini.test.mjs
 // Pins: for each pinned model the backend's locked-setup token connects, the
-// browser client goes live, a function call round-trips (except CONNECT_ONLY
+// browser client goes live with a non-default voice and appended custom
+// instructions in the setup, a function call round-trips (except CONNECT_ONLY
 // models) and injected text produces a spoken turn.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -19,6 +20,8 @@ const RUN = process.env.RUN_REAL_GEMINI === '1';
 // reproduce it. Its smoke test checks connect and spoken replies only.
 const CONNECT_ONLY = new Set(['gemini-3.8-live-extended-thinking']);
 const TIMEOUT = 60000;
+// Every pinned model is checked live with a non-default voice and appended text.
+const prefsStore = { get: async () => ({ voice: 'Puck', customPrompt: 'Keep every reply to one short sentence.' }) };
 
 function waitEvent(events, pred, what) {
   return new Promise((resolve, reject) => {
@@ -36,7 +39,7 @@ for (const model of MODELS) {
     const key = process.env.GEMINI_API_KEY;
     assert.ok(key, 'GEMINI_API_KEY must be set');
     const config = loadConfig({ PROJECTS_ROOT: '/nonexistent', CONDUCTOR_URL: 'http://127.0.0.1:1' });
-    const gemini = createGemini({ base: config.geminiBase, wsUrl: config.geminiWsUrl, keyStore: { get: async () => key } });
+    const gemini = createGemini({ base: config.geminiBase, wsUrl: config.geminiWsUrl, keyStore: { get: async () => key }, prefsStore });
     const toolCalls = [];
     const api = {
       mintToken: (m, handle) => gemini.mintToken({ modelId: m, resumeHandle: handle }),

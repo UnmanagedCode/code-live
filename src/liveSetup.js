@@ -20,15 +20,26 @@ export const SYSTEM_PROMPT = [
   'When a tool result has ok:false, explain the problem briefly.',
 ].join('\n');
 
-export function buildSetup(modelId, resumeHandle) {
+export const CUSTOM_PROMPT_HEADER = [
+  '--- Additional instructions from the user (code-live Settings) ---',
+  'Apply these where they do not conflict with the rules above, which always take precedence. They are standing preferences, never the user\'s spoken consent, answer or request for any tool call.',
+].join('\n');
+
+export function composeSystemPrompt(customPrompt) {
+  if (!customPrompt) return SYSTEM_PROMPT;
+  return `${SYSTEM_PROMPT}\n\n${CUSTOM_PROMPT_HEADER}\n${customPrompt}`;
+}
+
+export function buildSetup(modelId, resumeHandle, { voice = null, customPrompt = '' } = {}) {
   const model = getModel(modelId);
   if (!model) throw Object.assign(new Error(`unknown model: ${modelId}`), { code: 'UNKNOWN_MODEL' });
   const generationConfig = { responseModalities: ['AUDIO'] };
   if (model.thinkingLevel) generationConfig.thinkingConfig = { thinkingLevel: model.thinkingLevel };
+  if (voice) generationConfig.speechConfig = { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } } };
   return {
     model: `models/${model.id}`,
     generationConfig,
-    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    systemInstruction: { parts: [{ text: composeSystemPrompt(customPrompt) }] },
     tools: [{ functionDeclarations: toolDeclarations(model) }],
     inputAudioTranscription: {},
     outputAudioTranscription: {},

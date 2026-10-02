@@ -5,7 +5,9 @@
 // the mic lifecycle: at most one capture per session however start, resume and
 // stop interleave with the pending getUserMedia / worklet load, and every
 // capture a stop or failure leaves behind is released. It also pins the single
-// Connect / Disconnect button and the new-session divider.
+// Connect / Disconnect button and the new-session divider. It also pins the
+// voice and custom-instructions controls: locked while a session runs, and what
+// they save reaches the next token's setup.
 import { test, before, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -89,6 +91,7 @@ before(async () => {
   $ = (id) => document.getElementById(id);
   await import('../public/app.js');
   await waitFor(() => $('model').options.length > 0, { what: 'model options' });
+  await waitFor(() => $('settings-voice').options.length > 1, { what: 'voice options' });
 });
 
 // Disconnect is session.disconnect(), so this also leaves every test's pause cleared.
@@ -514,4 +517,54 @@ test('a token request that never answers returns the button to Connect', async (
   assert.equal($('connect').textContent, 'Connect');
   assert.equal($('connect').disabled, false);
   assert.ok(transcriptHas('No response from the backend within'));
+});
+
+test('the voice, instructions and their Save are locked while a session runs and free again after', async () => {
+  const controls = () => ['settings-voice', 'settings-prompt', 'settings-prompt-save'].map((id) => $(id).disabled);
+  assert.deepEqual(controls(), [false, false, false]);
+  await connectLive();
+  assert.deepEqual(controls(), [true, true, true]);
+  hangUp();
+  await waitFor(() => $('state').textContent === 'idle', { what: 'state idle' });
+  assert.deepEqual(controls(), [false, false, false]);
+});
+
+test('the voice, instructions and their Save are locked while connecting and while reconnecting, not only while live', async () => {
+  // Pins: the lock covers every state in which a token is minted for a running session.
+  const controls = () => ['settings-voice', 'settings-prompt', 'settings-prompt-save'].map((id) => $(id).disabled);
+  let release = holdTokenMint();
+  $('connect').click();
+  await waitFor(() => $('state').textContent === 'connecting', { what: 'state connecting' });
+  assert.deepEqual(controls(), [true, true, true], 'locked while connecting');
+  release();
+  await waitFor(() => $('state').textContent === 'live', { what: 'state live' });
+  const socket = await gemini.session(gemini.sessions.length - 1);
+
+  release = holdTokenMint(); // holds the resume's token request, so the page stays reconnecting
+  socket.send({ sessionResumptionUpdate: { newHandle: 'h1', resumable: true } });
+  socket.send({ goAway: { timeLeft: '5s' } });
+  await waitFor(() => $('state').textContent === 'reconnecting', { what: 'state reconnecting' });
+  assert.deepEqual(controls(), [true, true, true], 'locked while reconnecting');
+  release();
+  await waitFor(() => $('state').textContent === 'live', { what: 'state live after resume' });
+  assert.deepEqual(controls(), [true, true, true], 'locked while live again');
+});
+
+test('the saved voice and instructions reach the next minted setup', async (t) => {
+  t.after(async () => { await app.deps.prefs.setVoice(null); await app.deps.prefs.setCustomPrompt(''); });
+  const voice = $('settings-voice');
+  voice.value = 'Puck';
+  voice.dispatchEvent(new window.Event('change'));
+  $('settings-prompt').value = 'Keep every reply to one short sentence.';
+  $('settings-prompt-save').click();
+  await waitFor(async () => {
+    const p = await app.deps.prefs.get();
+    return p.voice === 'Puck' && p.customPrompt === 'Keep every reply to one short sentence.';
+  }, { what: 'saved preferences' });
+
+  await connectLive();
+  const mints = gemini.requests.filter((r) => r.url === '/v1beta/auth_tokens');
+  const setup = mints.at(-1).body.bidiGenerateContentSetup;
+  assert.equal(setup.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName, 'Puck');
+  assert.ok(setup.systemInstruction.parts[0].text.endsWith('Keep every reply to one short sentence.'));
 });
