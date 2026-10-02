@@ -4,7 +4,7 @@
 // change applies from the next mint.
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { writeFileAtomic, readJson } from './atomicFile.js';
+import { writeFileAtomic } from './atomicFile.js';
 import { isVoice } from './voices.js';
 
 export const CUSTOM_PROMPT_MAX = 4000;
@@ -29,14 +29,18 @@ export function createPrefsStore({ dir, write = writeFileAtomic }) {
   const file = path.join(dir, 'preferences.json');
   let writing = Promise.resolve(); // serializes read-merge-write so concurrent setters both land
 
+  // One read tells an absent file (defaults) from a present one: a file holding the
+  // JSON literal null is corrupt, which readJson's null return cannot distinguish.
   async function get() {
-    const data = await readJson(file);
-    if (data === null) {
-      // readJson gives null for an absent file and for a file holding the JSON literal null.
-      if (await fs.stat(file).then(() => true, (e) => { if (e.code === 'ENOENT') return false; throw e; })) throw corrupt();
-      return { voice: null, customPrompt: '' };
+    let raw;
+    try { raw = await fs.readFile(file, 'utf8'); }
+    catch (e) {
+      if (e.code === 'ENOENT') return { voice: null, customPrompt: '' };
+      throw e;
     }
-    if (typeof data !== 'object' || Array.isArray(data)) throw corrupt();
+    let data;
+    try { data = JSON.parse(raw); } catch { throw corrupt(); }
+    if (data === null || typeof data !== 'object' || Array.isArray(data)) throw corrupt();
     const voice = data.voice ?? null;
     if (voice !== null && !isVoice(voice)) throw corrupt();
     let customPrompt = data.customPrompt ?? '';
