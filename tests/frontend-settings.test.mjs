@@ -2,6 +2,8 @@
 // the masked tail, and never leaves the key anywhere in the DOM. It also pins
 // the voice select and custom-instructions textarea: loaded from the backend,
 // saved through the api, stored text rendered only as text, and locked on request.
+// The structure behind the spacing rhythm: every control sits in a group, and
+// only the closing note sits outside one.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadDom } from './dom.mjs';
@@ -155,4 +157,50 @@ test('setLocked disables the voice, prompt and its Save, never the key controls'
   for (const c of keyControls) assert.equal(c.disabled, false);
   settings.setLocked(false);
   for (const c of [voice, prompt, save]) assert.equal(c.disabled, false);
+});
+
+// Invariant: every control, row, label and status is inside a group that is a direct child of root.
+test('every settings control, row and status sits in a settings group', async () => {
+  const { root } = await mount(fakeApi());
+  const items = [...root.querySelectorAll('input, select, textarea, .row, .settings-status, label')];
+  assert.ok(items.length > 0);
+  for (const item of items) {
+    const group = item.closest('.settings-group');
+    assert.ok(group, `${item.tagName}.${item.className} is outside a settings group`);
+    assert.equal(group.parentElement, root);
+  }
+});
+
+// Invariant: the one ungrouped child of root is the closing hint, last.
+test('the only element outside a group is the footer note', async () => {
+  const { root } = await mount(fakeApi());
+  const outside = [...root.children].filter((c) => !c.classList.contains('settings-group'));
+  assert.equal(outside.length, 1);
+  assert.equal(outside[0].tagName, 'P');
+  assert.ok(outside[0].classList.contains('hint'));
+  assert.equal(root.lastElementChild, outside[0]);
+});
+
+// Invariant: every group opens with a .settings-label heading, and the key group's reads "Gemini API key".
+test('every settings group starts with a label heading; the key group is headed "Gemini API key"', async () => {
+  const { root } = await mount(fakeApi());
+  const groups = [...root.querySelectorAll('.settings-group')];
+  assert.ok(groups.length > 0);
+  for (const group of groups) {
+    const first = group.firstElementChild;
+    assert.equal(first.tagName, 'LABEL');
+    assert.ok(first.classList.contains('settings-label'));
+  }
+  assert.equal(groups[0].firstElementChild.textContent, 'Gemini API key');
+});
+
+// Invariant: the key heading is a label tied to the key input, in the order heading → hint → row → status.
+test('the key heading is tied to the key input, ahead of hint, row and status', async () => {
+  const { root } = await mount(fakeApi());
+  const group = root.querySelector('.settings-group');
+  const input = group.querySelector('input');
+  const label = group.querySelector('label');
+  assert.ok(input.id);
+  assert.equal(label.getAttribute('for'), input.id);
+  assert.deepEqual([...group.children].map((c) => c.className), ['settings-label', 'hint', 'row', 'settings-status']);
 });

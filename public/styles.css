@@ -47,10 +47,14 @@ pre.entry-body { margin: 0; font-size: .8rem; }
 .divider { display: flex; align-items: center; gap: .6rem; font-size: .75rem; color: var(--muted); }
 .divider::before, .divider::after { content: ""; flex: 1; border-top: 1px solid var(--border); }
 .settings-pane { border-top: 1px solid var(--border); padding: .5rem 1rem; }
+.settings-body { display: flex; flex-direction: column; gap: 1rem; padding-top: .5rem; }
+.settings-group { display: flex; flex-direction: column; gap: .5rem; }
 .settings-pane .row { display: flex; gap: .5rem; }
 .settings-pane input { flex: 1; }
+.settings-pane select { align-self: flex-start; }
 .settings-pane textarea { display: block; width: 100%; resize: vertical; }
-.settings-group + .settings-group { margin-top: .75rem; }
-.settings-label { display: block; font-weight: 600; margin-bottom: .25rem; }
+.settings-label { display: block; font-weight: 600; }
+.settings-pane .hint, .settings-pane .settings-status { margin: 0; color: var(--muted); font-size: .85rem; }
+.settings-status:empty { display: none; }
 .settings-status.error { color: var(--bad); }
 .hint { color: var(--muted); font-size: .85rem; }

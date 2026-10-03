@@ -9,7 +9,7 @@ User-facing behavior of the Code Live page and its voice tools. Wire shapes are 
 | status bar | session state pill (`idle`, `connecting`, `live`, `reconnecting`, `error`) the `Mic paused` pill (shown only while the mic is paused), and the host indicator (`Host connected` / `Host disconnected`: the backend's link to code-conductor's `/ws`) |
 | controls | **Model** select (the pinned models from `GET api/models`; a model with a `hint` shows it after the label, e.g. `Gemini 3.8 Live Extended Thinking (tool calls usually fail)`), **Connect** (one button: `Connect`, `Connecting...` while connecting, a red `Disconnect` while `live` or `reconnecting`), **Pause mic** / **Resume mic** |
 | transcript | You / Gemini transcription bubbles, tool calls and results as JSON, conductor announcements, status and error lines, and a `New session started · <time>` divider at the start of each session (not on a resume) |
-| Settings (collapsible) | Gemini API key: password field, **Save**, **Clear**, and the status `Key set (••••<last 4>)` or `No key set`. **Voice** select. **Custom instructions** textarea with **Save**. See [Voice and custom instructions](#voice-and-custom-instructions) |
+| Settings (collapsible) | **Gemini API key** heading over a password field, **Save**, **Clear**, and the status `Key set (••••<last 4>)` or `No key set`. **Voice** select. **Custom instructions** textarea with **Save**. See [Voice and custom instructions](#voice-and-custom-instructions) |
 
 The page is dark-only and uses code-conductor's shell colours, whatever the OS colour scheme.
 
