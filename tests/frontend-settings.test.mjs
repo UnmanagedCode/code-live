@@ -2,6 +2,8 @@
 // the masked tail, and never leaves the key anywhere in the DOM. It also pins
 // the voice select and custom-instructions textarea: loaded from the backend,
 // saved through the api, stored text rendered only as text, and locked on request.
+// The structure behind the spacing rhythm: every control sits in a group, and
+// only the closing note sits outside one.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadDom } from './dom.mjs';
@@ -155,4 +157,26 @@ test('setLocked disables the voice, prompt and its Save, never the key controls'
   for (const c of keyControls) assert.equal(c.disabled, false);
   settings.setLocked(false);
   for (const c of [voice, prompt, save]) assert.equal(c.disabled, false);
+});
+
+// Invariant: every control, row, label and status is inside a group that is a direct child of root.
+test('every settings control, row and status sits in a settings group', async () => {
+  const { root } = await mount(fakeApi());
+  const items = [...root.querySelectorAll('input, select, textarea, .row, .settings-status, label')];
+  assert.ok(items.length > 0);
+  for (const item of items) {
+    const group = item.closest('.settings-group');
+    assert.ok(group, `${item.tagName}.${item.className} is outside a settings group`);
+    assert.equal(group.parentElement, root);
+  }
+});
+
+// Invariant: the one ungrouped child of root is the closing hint, last.
+test('the only element outside a group is the footer note', async () => {
+  const { root } = await mount(fakeApi());
+  const outside = [...root.children].filter((c) => !c.classList.contains('settings-group'));
+  assert.equal(outside.length, 1);
+  assert.equal(outside[0].tagName, 'P');
+  assert.ok(outside[0].classList.contains('hint'));
+  assert.equal(root.lastElementChild, outside[0]);
 });

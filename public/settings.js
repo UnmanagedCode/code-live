@@ -63,9 +63,11 @@ export function installSettings(root, api) {
   });
 
   root.append(
-    el('p', { class: 'hint' }, 'The key is stored on the code-conductor machine and is never sent back to this page.'),
-    el('div', { class: 'row' }, [input, save, clear]),
-    status,
+    el('div', { class: 'settings-group' }, [
+      el('p', { class: 'hint' }, 'The key is stored on the code-conductor machine and is never sent back to this page.'),
+      el('div', { class: 'row' }, [input, save, clear]),
+      status,
+    ]),
     el('div', { class: 'settings-group' }, [
       el('label', { class: 'settings-label', for: 'settings-voice' }, 'Voice'),
       voice,
