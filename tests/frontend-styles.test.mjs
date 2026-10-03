@@ -82,13 +82,15 @@ test('a disabled select or textarea fades like a disabled button', () => {
   assert.equal(decls.cursor, 'not-allowed');
 });
 
-// Invariant: groups are 1rem apart, from a gap on the body (no sibling margins).
+// Invariant: groups are 1rem apart, from a gap on the body (no sibling margins),
+// and the first group sits .5rem below the summary, from the body's padding-top.
 test('settings body stacks groups with a 1rem gap', () => {
   const decls = declarationsOf('.settings-body');
   assert.ok(decls, 'styles.css has no .settings-body rule');
   assert.equal(decls.display, 'flex');
   assert.equal(decls['flex-direction'], 'column');
   assert.equal(decls.gap, '1rem');
+  assert.equal(decls['padding-top'], '.5rem');
 });
 
 // Invariant: items inside a group are .5rem apart, from a gap on the group.

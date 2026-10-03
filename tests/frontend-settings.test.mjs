@@ -180,3 +180,27 @@ test('the only element outside a group is the footer note', async () => {
   assert.ok(outside[0].classList.contains('hint'));
   assert.equal(root.lastElementChild, outside[0]);
 });
+
+// Invariant: every group opens with a .settings-label heading, and the key group's reads "Gemini API key".
+test('every settings group starts with a label heading; the key group is headed "Gemini API key"', async () => {
+  const { root } = await mount(fakeApi());
+  const groups = [...root.querySelectorAll('.settings-group')];
+  assert.ok(groups.length > 0);
+  for (const group of groups) {
+    const first = group.firstElementChild;
+    assert.equal(first.tagName, 'LABEL');
+    assert.ok(first.classList.contains('settings-label'));
+  }
+  assert.equal(groups[0].firstElementChild.textContent, 'Gemini API key');
+});
+
+// Invariant: the key heading is a label tied to the key input, in the order heading → hint → row → status.
+test('the key heading is tied to the key input, ahead of hint, row and status', async () => {
+  const { root } = await mount(fakeApi());
+  const group = root.querySelector('.settings-group');
+  const input = group.querySelector('input');
+  const label = group.querySelector('label');
+  assert.ok(input.id);
+  assert.equal(label.getAttribute('for'), input.id);
+  assert.deepEqual([...group.children].map((c) => c.className), ['settings-label', 'hint', 'row', 'settings-status']);
+});
