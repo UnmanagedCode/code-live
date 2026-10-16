@@ -45,7 +45,7 @@ async function mount(api: ReturnType<typeof fakeApi>, { locked = false, load = t
     setLocked: (l: boolean) => view.rerender(ui(l)),
     input: $<HTMLInputElement>('settings-key'), voice: $<HTMLSelectElement>('settings-voice'), prompt: $<HTMLTextAreaElement>('settings-prompt'), save: $<HTMLButtonElement>('settings-prompt-save'),
     keyStatus: $('settings-key-status'), voiceStatus: $('settings-voice-status'), promptStatus: $('settings-prompt-status'),
-    keySave: screen.getAllByRole('button', { name: 'Save' })[0], keyClear: screen.getByRole('button', { name: 'Clear' }),
+    keySave: screen.getAllByRole('button', { name: 'Save' })[0] as HTMLButtonElement, keyClear: screen.getByRole('button', { name: 'Clear' }) as HTMLButtonElement,
   };
 }
 

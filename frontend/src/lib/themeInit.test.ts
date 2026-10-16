@@ -23,6 +23,7 @@ afterEach(() => {
 it('standalone: follows prefers-color-scheme and its changes', async () => {
   const { flip } = stubMatchMedia(true);
   vi.resetModules();
+  // @ts-expect-error -- a classic script (no exports), imported for its side effect
   await import('../../public/theme-init.js');
   expect(root.classList.contains('dark')).toBe(true);
   flip(false);
@@ -36,6 +37,7 @@ it('embedded: does nothing when data-cc-theme is set', async () => {
   root.setAttribute('data-cc-theme', 'light');
   stubMatchMedia(true);
   vi.resetModules();
+  // @ts-expect-error -- a classic script (no exports), imported for its side effect
   await import('../../public/theme-init.js');
   expect(root.classList.contains('dark')).toBe(false);
   expect(window.matchMedia).not.toHaveBeenCalled();

@@ -26,15 +26,16 @@ export async function waitFor(fn, { timeoutMs = 2000, what = 'condition' } = {})
 
 // Starts the app. `startLink` connects to the fake host's /ws and waits for
 // the first open; `projectsRoot` reuses an existing root (restart tests);
-// `distDir` serves another UI build than frontend/dist.
-export async function startApp({ gemini, host, projectsRoot, now, distDir, link = {}, startLink = true, reconcileOnStart = true } = {}) {
+// `distDir` serves another UI build than frontend/dist; `fetchImpl` replaces the
+// backend's outbound fetch (under a test DOM, the global fetch is the DOM's).
+export async function startApp({ gemini, host, projectsRoot, now, distDir, fetchImpl, link = {}, startLink = true, reconcileOnStart = true } = {}) {
   const root = projectsRoot ?? await tempDir();
   const config = loadConfig({
     PROJECTS_ROOT: root,
     CONDUCTOR_URL: host ? host.url : 'http://127.0.0.1:9',
     CODE_LIVE_GEMINI_BASE: gemini ? gemini.base : 'http://127.0.0.1:9',
   });
-  const deps = await buildDeps(config, { now, distDir, link: { baseDelayMs: 5, maxDelayMs: 40, ackTimeoutMs: 300, ...link } });
+  const deps = await buildDeps(config, { now, distDir, fetchImpl, link: { baseDelayMs: 5, maxDelayMs: 40, ackTimeoutMs: 300, ...link } });
   const server = createServer(deps);
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const url = `http://127.0.0.1:${server.address().port}`;
@@ -85,7 +86,7 @@ export function nodeFetch(url, { method = 'GET', headers = {}, body, signal } = 
       res.on('end', () => {
         done();
         const text = Buffer.concat(chunks).toString('utf8');
-        resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, text: async () => text, json: async () => JSON.parse(text) });
+        resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, statusText: res.statusMessage, text: async () => text, json: async () => JSON.parse(text) });
       });
     });
     function onAbort() { r.destroy(); reject(signal.reason); }

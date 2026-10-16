@@ -1,4 +1,4 @@
-// Pins: the real page (index.html + app.js) wires the mic pause end to end. A
+// Pins: the real page (App over the real controller) wires the mic pause end to end. A
 // session `mic`/`state` event re-renders the Pause button and pill, and while
 // paused the capture handler discards frames, so no audio captured during a
 // pause (nor the partial chunk before it) is sent after Resume. It also pins
@@ -8,33 +8,50 @@
 // Connect / Disconnect button and the new-session divider. It also pins the
 // voice and custom-instructions controls: locked while a session runs, and what
 // they save reaches the next token's setup.
-import { test, before, after, afterEach } from 'node:test';
+// It drives the real backend, fake Gemini and fake host; the browser's network,
+// audio and microphone are injected into the controller. A click commits its
+// render before the next line (flushSync), as a browser does before it paints.
+import { test, beforeAll as before, afterAll as after, afterEach, onTestFinished } from 'vitest';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { loadDom } from './dom.mjs';
-import { base64ToPcm16 } from '../public/audio.js';
-import { startFakeGemini } from './fakes/fakeGemini.mjs';
-import { startFakeHost } from './fakes/fakeHost.mjs';
-import { startApp, waitFor, SENTINEL_KEY, CONDUCTOR_A } from './helpers.mjs';
+import { StrictMode } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { flushSync } from 'react-dom';
+import WebSocket from 'ws';
+import { App } from './App';
+import { createAppController } from './lib/controller.js';
+import { base64ToPcm16 } from './lib/audio.js';
+import { startFakeGemini } from '../../tests/fakes/fakeGemini.mjs';
+import * as fakeHost from '../../tests/fakes/fakeHost.mjs';
+import * as helpers from '../../tests/helpers.mjs';
+
+// The node-side harness is untyped JS; its handles are used as `any` here.
+const { startFakeHost } = fakeHost as any;
+const { startApp, waitFor, nodeFetch, SENTINEL_KEY, CONDUCTOR_A } = helpers as any;
 
 const RATE = 16000; // equals Gemini's input rate, so downsample is the identity
-const nodes = []; // AudioWorkletNode stubs, one per capture built
-const streams = []; // fake MediaStreams handed out by the default getUserMedia
-const settleOnTeardown = []; // deferreds a test left pending, with the value to settle them with
+type FakeTrack = { stopped: boolean; stop(): void };
+type FakeStream = { tracks: FakeTrack[]; getTracks(): FakeTrack[] };
+type Deferred<T> = { promise: Promise<T>; resolve: (v?: any) => void; reject: (e: unknown) => void };
+
+const nodes: any[] = []; // AudioWorkletNode stubs, one per capture built
+const streams: any[] = []; // fake MediaStreams handed out by the default getUserMedia
+const settleOnTeardown: { d: Deferred<any>; fallback?: () => unknown }[] = []; // deferreds a test left pending, with the value to settle them with
 const defaultGum = async () => fakeStream();
 const defaultLoadModule = async () => {};
-let gum = defaultGum;
-let loadModule = defaultLoadModule;
+let gum: (c?: unknown) => Promise<unknown> = defaultGum;
+let loadModule: () => Promise<unknown> = defaultLoadModule;
 let gumCalls = 0;
 let moduleCalls = 0;
-let tokenGate = null; // a promise api/token waits on, set by holdTokenMint
-let gemini;
-let host;
-let app;
-let document;
-let $;
+let tokenGate: Promise<unknown> | null = null; // a promise api/token waits on, set by holdTokenMint
+let gemini: any;
+let host: any;
+let app: any;
+let root: Root;
+const $ = (id: string) => document.getElementById(id) as any;
+// Clicks and commits the render the click caused.
+const click = (el: HTMLElement) => flushSync(() => el.click());
 
-function fakeStream() {
+function fakeStream(): FakeStream {
   const track = { stopped: false, stop() { this.stopped = true; } };
   const stream = { tracks: [track], getTracks() { return this.tracks; } };
   streams.push(stream);
@@ -42,54 +59,55 @@ function fakeStream() {
 }
 
 // A promise a test settles by hand; `fallback` builds the value teardown resolves it with.
-function deferred(fallback) {
-  const d = {};
+function deferred<T = unknown>(fallback?: () => T): Deferred<T> {
+  const d = {} as Deferred<T>;
   d.promise = new Promise((resolve, reject) => { d.resolve = resolve; d.reject = reject; });
   settleOnTeardown.push({ d, fallback });
   return d;
 }
 
-function stubBrowser(baseUrl) {
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = async (u, o) => {
-    if (u === 'api/token' && tokenGate) {
-      // A real fetch rejects when its signal aborts.
-      const aborted = new Promise((_, reject) => o?.signal?.addEventListener('abort', () => reject(o.signal.reason)));
-      await Promise.race([tokenGate, aborted]);
-    }
-    return realFetch(new URL(u, baseUrl + '/'), o);
+// The browser the controller runs against: the network over node:http to the
+// real backend, the ws package for the Gemini socket, and audio/mic stubs.
+function browserEnv(baseUrl: string) {
+  return {
+    fetchImpl: (async (u: string, o: any) => {
+      if (u === 'api/token' && tokenGate) {
+        // A real fetch rejects when its signal aborts.
+        const aborted = new Promise((_, reject) => o?.signal?.addEventListener('abort', () => reject(o.signal.reason)));
+        await Promise.race([tokenGate, aborted]);
+      }
+      return nodeFetch(new URL(u, baseUrl + '/'), o);
+    }) as unknown as typeof fetch,
+    WebSocketImpl: WebSocket,
+    EventSourceImpl: class { addEventListener() {} },
+    AudioContextImpl: class {
+      sampleRate = RATE;
+      currentTime = 0;
+      audioWorklet = { addModule: () => { moduleCalls++; return loadModule(); } };
+      resume = async () => {};
+      createMediaStreamSource = () => ({ connect() {}, disconnect() {} });
+    },
+    AudioWorkletNodeImpl: class {
+      port = {};
+      disconnected = false;
+      constructor() { nodes.push(this); }
+      connect() {}
+      disconnect() { this.disconnected = true; }
+    },
+    mediaDevices: { getUserMedia: (c: unknown) => { gumCalls++; return gum(c); } },
   };
-  globalThis.EventSource = class { addEventListener() {} };
-  globalThis.AudioContext = class {
-    sampleRate = RATE;
-    currentTime = 0;
-    audioWorklet = { addModule: () => { moduleCalls++; return loadModule(); } };
-    resume = async () => {};
-    createMediaStreamSource = () => ({ connect() {}, disconnect() {} });
-  };
-  globalThis.AudioWorkletNode = class {
-    port = {};
-    constructor() { nodes.push(this); }
-    connect() {}
-    disconnect() { this.disconnected = true; }
-  };
-  Object.defineProperty(globalThis, 'navigator', {
-    configurable: true,
-    value: { mediaDevices: { getUserMedia: (c) => { gumCalls++; return gum(c); } } },
-  });
 }
 
 before(async () => {
   gemini = await startFakeGemini();
   host = await startFakeHost({ instances: [CONDUCTOR_A] });
-  app = await startApp({ gemini, host });
+  app = await startApp({ gemini, host, fetchImpl: nodeFetch });
   await app.deps.keyStore.set(SENTINEL_KEY);
-  stubBrowser(app.url);
-  ({ document } = await loadDom());
-  const body = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8').match(/<body>([\s\S]*)<\/body>/)[1];
-  document.body.innerHTML = body;
-  $ = (id) => document.getElementById(id);
-  await import('../public/app.js');
+  const controller = createAppController(browserEnv(app.url));
+  const container = document.createElement('div');
+  document.body.append(container);
+  root = createRoot(container);
+  flushSync(() => root.render(<StrictMode><App controller={controller} /></StrictMode>));
   await waitFor(() => $('model').options.length > 0, { what: 'model options' });
   await waitFor(() => $('settings-voice').options.length > 1, { what: 'voice options' });
 });
@@ -97,17 +115,18 @@ before(async () => {
 // Disconnect is session.disconnect(), so this also leaves every test's pause cleared.
 // Then no start is left pending: settle what a test abandoned and let it finish.
 afterEach(async () => {
-  if ($('connect').textContent === 'Disconnect') $('connect').click();
+  if ($('connect').textContent === 'Disconnect') click($('connect'));
   gemini.setConnectMode('ok');
   gemini.setMintFailure(null);
   tokenGate = null;
   gum = defaultGum;
   loadModule = defaultLoadModule;
   for (const { d, fallback } of settleOnTeardown.splice(0)) d.resolve(fallback?.());
-  await new Promise((r) => setImmediate(r));
+  await new Promise<void>((r) => setImmediate(r));
 });
 
 after(async () => {
+  root.unmount();
   await app.stop();
   await host.close();
   await gemini.close();
@@ -116,7 +135,7 @@ after(async () => {
 // Clicks the button, which must read Disconnect.
 function hangUp() {
   assert.equal($('connect').textContent, 'Disconnect');
-  $('connect').click();
+  click($('connect'));
 }
 
 // Makes api/token wait until the returned `release` is called.
@@ -131,7 +150,7 @@ async function connectLive() {
   const sockets = gemini.sessions.length;
   const mics = nodes.length;
   assert.equal($('connect').textContent, 'Connect');
-  $('connect').click();
+  click($('connect'));
   await waitFor(() => $('state').textContent === 'live', { what: 'state live' });
   await waitFor(() => nodes.length > mics && nodes.at(-1).port.onmessage, { what: 'mic started' });
   return { socket: await gemini.session(sockets), node: nodes.at(-1) };
@@ -142,14 +161,14 @@ async function connectLive() {
 async function connectPending() {
   const sockets = gemini.sessions.length;
   assert.equal($('connect').textContent, 'Connect');
-  $('connect').click();
+  click($('connect'));
   await waitFor(() => $('state').textContent === 'live', { what: 'state live' });
   return gemini.session(sockets);
 }
 
 // Makes Gemini hand the session over (handle, then goAway) and resolves with the
 // resumed socket once the page is live again.
-async function resume(socket) {
+async function resume(socket: any) {
   const next = gemini.sessions.length;
   socket.send({ sessionResumptionUpdate: { newHandle: 'h1', resumable: true } });
   socket.send({ goAway: { timeLeft: '5s' } });
@@ -158,13 +177,13 @@ async function resume(socket) {
   return resumed;
 }
 
-const mints = () => gemini.requests.filter((r) => r.url === '/v1beta/auth_tokens').length;
-const dividers = () => $('transcript').querySelectorAll('.divider');
-const transcriptHas = (text) => $('transcript').textContent.includes(text);
-const startedAfter = (mics) => waitFor(() => nodes.length > mics && nodes.at(-1).port.onmessage, { what: 'mic started' });
+const mints = () => gemini.requests.filter((r: any) => r.url === '/v1beta/auth_tokens').length;
+const dividers = () => $('transcript').querySelectorAll('[data-kind="divider"]');
+const transcriptHas = (text: string) => $('transcript').textContent.includes(text);
+const startedAfter = (mics: number) => waitFor(() => nodes.length > mics && nodes.at(-1).port.onmessage, { what: 'mic started' });
 
-const frame = (n, value) => ({ data: new Float32Array(n).fill(value) });
-const audioChunks = (socket) => socket.messages.filter((m) => m.realtimeInput?.audio).map((m) => [...base64ToPcm16(m.realtimeInput.audio.data)]);
+const frame = (n: number, value: number) => ({ data: new Float32Array(n).fill(value) });
+const audioChunks = (socket: any): number[][] => socket.messages.filter((m: any) => m.realtimeInput?.audio).map((m: any) => [...base64ToPcm16(m.realtimeInput.audio.data)]);
 
 test('the button and pill follow the session: state enables it, mic events toggle it', async () => {
   // Counterfactuals: dropping micControl.render() from onEvent's state branch leaves
@@ -177,17 +196,17 @@ test('the button and pill follow the session: state enables it, mic events toggl
   assert.equal($('pause').disabled, false);
   assert.equal($('pause').textContent, 'Pause mic');
 
-  $('pause').click();
+  click($('pause'));
   assert.equal($('pause').textContent, 'Resume mic');
   assert.equal($('pause').getAttribute('aria-pressed'), 'true');
   assert.equal($('mic').hidden, false);
 
-  $('pause').click();
+  click($('pause'));
   assert.equal($('pause').textContent, 'Pause mic');
   assert.equal($('pause').getAttribute('aria-pressed'), 'false');
   assert.equal($('mic').hidden, true);
 
-  $('pause').click();
+  click($('pause'));
   hangUp();
   assert.equal($('pause').disabled, true);
   assert.equal($('pause').textContent, 'Pause mic', 'Disconnect clears the pause');
@@ -202,23 +221,23 @@ test('while paused the capture handler discards frames, including the partial ch
   // chunk would carry the 0.5 / -0.5 samples checked below. sendAudio's own
   // paused gate cannot catch either: the chunk is assembled after Resume.
   const { socket, node } = await connectLive();
-  const feed = (n, v) => node.port.onmessage(frame(n, v));
+  const feed = (n: number, v: number) => node.port.onmessage(frame(n, v));
 
   feed(700, 0.125); feed(700, 0.125); feed(700, 0.125);
   await waitFor(() => audioChunks(socket).length === 1, { what: 'first chunk' });
 
   feed(700, 0.5); // partial chunk held when the pause starts
-  $('pause').click();
-  await socket.next((m) => m.realtimeInput?.audioStreamEnd);
+  click($('pause'));
+  await socket.next((m: any) => m.realtimeInput?.audioStreamEnd);
   feed(700, -0.5); // captured while paused
-  $('pause').click();
+  click($('pause'));
   feed(700, 0.25); feed(700, 0.25); feed(700, 0.25);
 
   await waitFor(() => audioChunks(socket).length === 2, { what: 'chunk after resume' });
   const [, afterResume] = audioChunks(socket);
   assert.equal(afterResume.length, 2100);
   assert.ok(afterResume.every((x) => x === 8192), 'only post-resume samples (0.25 -> 8192) were sent');
-  assert.equal(socket.messages.filter((m) => m.realtimeInput?.audioStreamEnd).length, 1);
+  assert.equal(socket.messages.filter((m: any) => m.realtimeInput?.audioStreamEnd).length, 1);
 });
 
 test('a resume while getUserMedia is pending starts no second capture', async () => {
@@ -358,7 +377,7 @@ test("a stale start's rejection does not clear the current one", async () => {
   const a = deferred();
   const b = deferred(fakeStream);
   const queue = [a, b];
-  gum = () => queue.shift().promise;
+  gum = () => queue.shift()!.promise;
   const gums = gumCalls;
   const mics = nodes.length;
   await connectPending();
@@ -370,7 +389,7 @@ test("a stale start's rejection does not clear the current one", async () => {
   b.resolve(fakeStream());
   await startedAfter(mics);
   await resume(s1);
-  await new Promise((r) => setImmediate(r));
+  await new Promise<void>((r) => setImmediate(r));
   assert.equal(gumCalls - gums, 2, 'the resume did not start a third capture');
   const live = nodes.slice(mics).filter((n) => n.port.onmessage && !n.disconnected);
   assert.equal(live.length, 1);
@@ -383,27 +402,27 @@ test('a pause during a pending start holds once the capture starts', async () =>
   gum = () => d.promise;
   const mics = nodes.length;
   const socket = await connectPending();
-  $('pause').click();
-  await socket.next((m) => m.realtimeInput?.audioStreamEnd);
+  click($('pause'));
+  await socket.next((m: any) => m.realtimeInput?.audioStreamEnd);
 
   d.resolve(fakeStream());
   await startedAfter(mics);
-  const feed = (n, v) => nodes.at(-1).port.onmessage(frame(n, v));
+  const feed = (n: number, v: number) => nodes.at(-1).port.onmessage(frame(n, v));
   feed(700, 0.5); feed(700, 0.5); feed(700, 0.5); // captured while paused
-  $('pause').click();
+  click($('pause'));
   feed(700, 0.25); feed(700, 0.25); feed(700, 0.25);
 
   await waitFor(() => audioChunks(socket).length >= 1, { what: 'chunk after resume' });
   assert.equal(audioChunks(socket).length, 1);
   assert.ok(audioChunks(socket)[0].every((x) => x === 8192), 'only post-resume samples were sent');
-  assert.equal(socket.messages.filter((m) => m.realtimeInput?.audioStreamEnd).length, 1);
+  assert.equal(socket.messages.filter((m: any) => m.realtimeInput?.audioStreamEnd).length, 1);
 });
 
 test('one button walks Connect → Connecting... → Disconnect → Connect', async () => {
   // Pins: the button's label, state, disabled and aria-busy follow the session
   // through idle, connecting, live and back to idle, and it is the only connect control.
   const release = holdTokenMint();
-  $('connect').click();
+  click($('connect'));
   await waitFor(() => $('connect').textContent === 'Connecting...', { what: 'Connecting...' });
   assert.equal($('connect').disabled, true);
   assert.equal($('connect').getAttribute('aria-busy'), 'true');
@@ -415,7 +434,7 @@ test('one button walks Connect → Connecting... → Disconnect → Connect', as
   assert.equal($('connect').disabled, false);
   assert.equal($('connect').getAttribute('aria-busy'), 'false');
   assert.equal($('disconnect'), null);
-  const connectButtons = [...document.querySelectorAll('button')].filter((b) => /connect/i.test(b.textContent));
+  const connectButtons = [...document.querySelectorAll('button')].filter((b) => /connect/i.test(b.textContent!));
   assert.equal(connectButtons.length, 1);
 
   hangUp();
@@ -429,15 +448,15 @@ test('clicks while connecting open no second connection', async () => {
   const mintsBefore = mints();
   const socketsBefore = gemini.sessions.length;
   const release = holdTokenMint();
-  $('connect').click();
-  $('connect').click(); // lands in the audioCtx.resume() gap, while the state is still idle
+  click($('connect'));
+  click($('connect')); // lands in the audioCtx.resume() gap, while the state is still idle
   await waitFor(() => $('connect').textContent === 'Connecting...', { what: 'Connecting...' });
-  $('connect').click();
-  $('connect').click();
+  click($('connect'));
+  click($('connect'));
 
   release();
   await waitFor(() => $('state').textContent === 'live', { what: 'state live' });
-  await new Promise((r) => setImmediate(r));
+  await new Promise<void>((r) => setImmediate(r));
   assert.equal(mints() - mintsBefore, 1);
   assert.equal(gemini.sessions.length - socketsBefore, 1);
 });
@@ -448,7 +467,7 @@ test('a failed connect returns the button to Connect and adds no divider', async
   const before = dividers().length;
   gemini.setConnectMode('reject');
   const release = holdTokenMint();
-  $('connect').click();
+  click($('connect'));
   await waitFor(() => $('connect').textContent === 'Connecting...', { what: 'Connecting...' });
   release();
 
@@ -496,21 +515,21 @@ test('a reconnect keeps earlier messages and adds exactly one divider after them
   await connectLive();
   assert.ok(transcriptHas('first session reply'));
   assert.equal(dividers().length, n + 1);
-  const entry = [...$('transcript').querySelectorAll('.entry')].find((e) => e.textContent.includes('first session reply'));
+  const entry = [...$('transcript').querySelectorAll('[data-kind]:not([data-kind="divider"])')].find((e: Element) => e.textContent!.includes('first session reply'));
   const divider = [...dividers()].at(-1);
   assert.ok(entry.compareDocumentPosition(divider) & 4 /* Node.DOCUMENT_POSITION_FOLLOWING */);
   assert.match(divider.textContent, /^New session started · /);
 });
 
-test('a token request that never answers returns the button to Connect', async (t) => {
+test('a token request that never answers returns the button to Connect', async () => {
   // Pins: the page bounds its token request, so a stalled POST api/token ends the
   // attempt in `error` with an enabled Connect button instead of a stuck Connecting...
   // The page's timeout is shortened by wrapping AbortSignal.timeout.
   const realTimeout = AbortSignal.timeout;
   AbortSignal.timeout = () => realTimeout.call(AbortSignal, 20);
-  t.after(() => { AbortSignal.timeout = realTimeout; });
+  onTestFinished(() => { AbortSignal.timeout = realTimeout; });
   holdTokenMint();
-  $('connect').click();
+  click($('connect'));
   await waitFor(() => $('connect').textContent === 'Connecting...', { what: 'Connecting...' });
 
   await waitFor(() => $('state').textContent === 'error', { what: 'state error' });
@@ -533,7 +552,7 @@ test('the voice, instructions and their Save are locked while connecting and whi
   // Pins: the lock covers every state in which a token is minted for a running session.
   const controls = () => ['settings-voice', 'settings-prompt', 'settings-prompt-save'].map((id) => $(id).disabled);
   let release = holdTokenMint();
-  $('connect').click();
+  click($('connect'));
   await waitFor(() => $('state').textContent === 'connecting', { what: 'state connecting' });
   assert.deepEqual(controls(), [true, true, true], 'locked while connecting');
   release();
@@ -550,20 +569,20 @@ test('the voice, instructions and their Save are locked while connecting and whi
   assert.deepEqual(controls(), [true, true, true], 'locked while live again');
 });
 
-test('the saved voice and instructions reach the next minted setup', async (t) => {
-  t.after(async () => { await app.deps.prefs.setVoice(null); await app.deps.prefs.setCustomPrompt(''); });
+test('the saved voice and instructions reach the next minted setup', async () => {
+  onTestFinished(async () => { await app.deps.prefs.setVoice(null); await app.deps.prefs.setCustomPrompt(''); });
   const voice = $('settings-voice');
   voice.value = 'Puck';
-  voice.dispatchEvent(new window.Event('change'));
+  voice.dispatchEvent(new Event('change', { bubbles: true })); // a browser's change event bubbles; React listens at the root
   $('settings-prompt').value = 'Keep every reply to one short sentence.';
-  $('settings-prompt-save').click();
+  click($('settings-prompt-save'));
   await waitFor(async () => {
     const p = await app.deps.prefs.get();
     return p.voice === 'Puck' && p.customPrompt === 'Keep every reply to one short sentence.';
   }, { what: 'saved preferences' });
 
   await connectLive();
-  const mints = gemini.requests.filter((r) => r.url === '/v1beta/auth_tokens');
+  const mints = gemini.requests.filter((r: any) => r.url === '/v1beta/auth_tokens');
   const setup = mints.at(-1).body.bidiGenerateContentSetup;
   assert.equal(setup.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName, 'Puck');
   assert.ok(setup.systemInstruction.parts[0].text.endsWith('Keep every reply to one short sentence.'));

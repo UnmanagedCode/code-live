@@ -44,7 +44,8 @@ describe('Notices', () => {
 
   it("an unreachable backend says so, with the reason, for models and for settings", async () => {
     const down = () => ({ status: 503, body: { error: 'plugin backend unavailable' } });
-    for (const routes of [{ 'GET api/models': down }, { 'GET api/settings': down }]) {
+    const failing: Record<string, typeof down>[] = [{ 'GET api/models': down }, { 'GET api/settings': down }];
+    for (const routes of failing) {
       const { unmount } = await renderApp(fakeEnv({ routes }));
       const alert = notice('backend')!;
       expect(alert.getAttribute('role')).toBe('alert');
