@@ -5,6 +5,8 @@
 // pause and the host link; state details land in the transcript; a refused
 // microphone permission sets micBlocked until a capture starts or the session is
 // disconnected; failed loads are surfaced; one controller opens one EventSource.
+// The AudioContext is created synchronously in the click's own task (before its
+// first await), and Disconnect stops the audio the player has queued.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createAppController } from '../frontend/src/lib/controller.js';
@@ -66,14 +68,25 @@ function fakeEnv({ routes = {}, gum } = {}) {
   }
 
   const contexts = [];
+  const sources = []; // playback buffer sources the player started
   class FakeAudioContext {
     sampleRate = 16000;
     currentTime = 0;
     resumes = 0;
+    destination = {};
     audioWorklet = { addModule: async () => {} };
     constructor() { contexts.push(this); }
     async resume() { this.resumes++; }
     createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+    createBuffer(channels, length, rate) {
+      const data = new Float32Array(length);
+      return { channels, length, rate, duration: length / rate, getChannelData: () => data };
+    }
+    createBufferSource() {
+      const src = { buffer: null, startedAt: null, stopped: false, onended: null, connect() {}, start(at) { this.startedAt = at; }, stop() { this.stopped = true; } };
+      sources.push(src);
+      return src;
+    }
   }
   const nodes = [];
   class FakeNode { port = {}; constructor() { nodes.push(this); } connect() {} disconnect() {} }
@@ -89,7 +102,7 @@ function fakeEnv({ routes = {}, gum } = {}) {
 
   const env = { fetchImpl, WebSocketImpl: FakeSocket, EventSourceImpl: FakeEventSource, AudioContextImpl: FakeAudioContext, AudioWorkletNodeImpl: FakeNode, mediaDevices, now: () => new Date(2026, 0, 1) };
   const holdToken = () => { let release; tokenGate = new Promise((r) => { release = r; }); return () => { tokenGate = null; release(); }; };
-  return { env, calls, sockets, eventSources, contexts, nodes, tracks, holdToken, FakeSocket };
+  return { env, calls, sockets, eventSources, contexts, sources, nodes, tracks, holdToken, FakeSocket };
 }
 
 async function build(opts) {
@@ -259,4 +272,28 @@ test('a conductor announce while live is injected into the session and added to 
   t.eventSources[0].emit('announce', { sessionId: 'c', title: 'Alpha', text: 'done' });
   assert.equal(t.c.transcript.getSnapshot().at(-1).label, 'Conductor · Alpha');
   assert.ok(t.sockets[0].sent.some((m) => m.realtimeInput?.text === 'CONDUCTOR UPDATE from "Alpha" (session c):\ndone'));
+});
+
+test('the AudioContext is created in the click\'s own task, before the action first awaits', async () => {
+  // A browser lets audio start only from a context created during the user gesture.
+  const t = await build();
+  const pending = t.c.toggleConnect();
+  assert.equal(t.contexts.length, 1, 'created synchronously, before toggleConnect returned');
+  assert.equal(t.contexts[0].resumes, 1, 'and resumed in the same task');
+  await pending;
+  await until(() => t.state() === 'live', 'live');
+});
+
+test('Disconnect stops the audio the player has queued', async () => {
+  const t = await build();
+  await goLive(t);
+  const samples = Buffer.alloc(2 * 2400).toString('base64'); // 100 ms of 24 kHz PCM16
+  t.sockets[0].server({ serverContent: { modelTurn: { parts: [{ inlineData: { mimeType: 'audio/pcm;rate=24000', data: samples } }] } } });
+  t.sockets[0].server({ serverContent: { modelTurn: { parts: [{ inlineData: { mimeType: 'audio/pcm;rate=24000', data: samples } }] } } });
+  assert.equal(t.sources.length, 2, 'the player queued both chunks');
+  assert.deepEqual(t.sources.map((src) => [src.buffer.rate, src.buffer.length, src.startedAt]), [[24000, 2400, 0], [24000, 2400, 0.1]], 'gapless: the second starts where the first ends');
+  assert.ok(t.sources.every((src) => !src.stopped));
+  await t.c.toggleConnect();
+  assert.equal(t.state(), 'idle');
+  assert.ok(t.sources.every((src) => src.stopped), 'both queued sources are stopped');
 });

@@ -58,9 +58,25 @@ test('own code has no literal colours', () => {
   for (const [n, src] of own) assert.equal(literal.test(src), false, `${n}: ${src.match(literal)?.[0]}`);
 });
 
-// Invariant: only public/theme-init.js (standalone) touches the dark class or data-cc-theme; cc's choice applies.
+// Invariant: only public/theme-init.js (standalone) touches the dark class or data-cc-theme, by any API
+// (classList, className, setAttribute, dataset); cc's choice applies.
 test("no theme control of the plugin's own", () => {
-  const mutates = /classList\.(?:add|remove|toggle|replace)\(\s*['"]dark['"]|(?:set|remove|toggle)Attribute\(\s*['"]data-cc-theme/;
+  const mutates = new RegExp([
+    /classList\.(?:add|remove|toggle|replace)\(\s*['"]dark['"]/.source,
+    /(?:set|remove|toggle)Attribute\(\s*['"]data-cc-theme/.source,
+    /\.className\s*\+?=[^;\n]*\bdark\b/.source,
+    /setAttribute\(\s*['"]class['"][^)\n]*\bdark\b/.source,
+    /dataset\.ccTheme\s*=(?!=)/.source,
+    /dataset\[\s*['"]ccTheme['"]\s*\]\s*=(?!=)/.source,
+    /delete\s+[\w.]*dataset\.ccTheme/.source,
+  ].join('|'));
+  for (const bad of ["root.classList.add('dark')", "root.setAttribute('data-cc-theme', 'dark')", "root.className = 'dark'", "root.className += ' dark'",
+    "root.setAttribute('class', 'x dark')", "root.dataset.ccTheme = 'light'", "root.dataset['ccTheme'] = 'light'", 'delete root.dataset.ccTheme']) {
+    assert.ok(mutates.test(bad), `the scan catches ${bad}`);
+  }
+  for (const good of ['<div className="dark:bg-input/30">', "if (root.dataset.ccTheme === 'dark')", "el.className = 'darker-text'"]) {
+    assert.equal(mutates.test(good), false, `the scan lets through ${good}`);
+  }
   for (const [n, src] of sourceFiles()) {
     if (n === 'public/theme-init.js') {
       assert.match(src, /classList\.toggle\('dark'/);

@@ -5,7 +5,8 @@
 // however the start's steps are still pending; an abandoned start builds
 // nothing; a failure releases the stream and clears the claim, unless a newer
 // start holds it. onStarted fires only for a completed capture.
-// The sample rate equals Gemini's 16 kHz input, so downsample is the identity.
+// The sample rate equals Gemini's 16 kHz input, so downsample is the identity,
+// except where a test sets a 48 kHz context: its 100 ms chunks go out at 16 kHz.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMicCapture } from '../frontend/src/lib/micCapture.js';
@@ -19,7 +20,7 @@ function deferred() {
   return d;
 }
 
-function setup({ gum, loadModule = async () => {} } = {}) {
+function setup({ gum, loadModule = async () => {}, sampleRate = 16000 } = {}) {
   const streams = [];
   const nodes = [];
   const modules = [];
@@ -34,7 +35,7 @@ function setup({ gum, loadModule = async () => {} } = {}) {
   };
   const constraints = [];
   const ctx = {
-    sampleRate: 16000,
+    sampleRate,
     audioWorklet: { addModule: (url) => { modules.push(url); return loadModule(); } },
     createMediaStreamSource: () => ({ connected: false, connect() { this.connected = true; }, disconnect() { this.disconnected = true; } }),
   };
@@ -149,4 +150,17 @@ test("a stale start's rejection does not clear the newer claim", async () => {
   await tick();
   assert.deepEqual(s.errors.map((e) => e.message), ['A denied']);
   assert.equal(s.mic.active, true, 'the newer claim survives');
+});
+
+test('a 48 kHz context sends 100 ms chunks resampled to 16 kHz', async () => {
+  const s = setup({ sampleRate: 48000 });
+  s.mic.start();
+  await tick();
+  const feed = () => s.nodes[0].port.onmessage(frame(1600, 0.25));
+  feed(); feed();
+  assert.equal(s.sent.length, 0, '3,200 samples are under 100 ms at 48 kHz');
+  feed();
+  assert.equal(s.sent.length, 1, 'the third frame reaches 4,800 samples, 100 ms at 48 kHz');
+  assert.equal(s.sent[0].length, (3 * 1600) / 3, 'a third of the pushed samples: 1,600, 100 ms at 16 kHz');
+  assert.ok(s.sent[0].every((x) => x === 8192), 'a constant input stays constant');
 });

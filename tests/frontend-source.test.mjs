@@ -5,6 +5,8 @@
 // nothing that stops work when the page is hidden (cc keeps this page alive
 // hidden). index.html loads the bridge first, then the host theme, then
 // theme-init.js, with no inline code, and every reference it makes exists.
+// No code creates a <style> element. main.tsx builds the one controller once,
+// at module level before createRoot, never inside the rendered tree.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readdirSync } from 'node:fs';
@@ -15,6 +17,13 @@ const files = sourceFiles();
 const code = files.filter(([n]) => /\.(ts|tsx|js)$/.test(n));
 const own = code.filter(([n]) => n.startsWith('src/') && !n.startsWith('src/components/ui/'));
 const html = files.find(([n]) => n === 'index.html')[1];
+const srcCode = code.filter(([n]) => n.startsWith('src/'));
+
+// Each pattern's verdict on strings it must and must not match, so a scan cannot pass vacuously.
+function assertPattern(re, bad, good) {
+  for (const b of bad) assert.ok(re.test(b), `${re} catches ${b}`);
+  for (const g of good) assert.equal(re.test(g), false, `${re} lets through ${g}`);
+}
 
 test('the scan sees the page code', () => {
   const names = files.map(([n]) => n);
@@ -35,6 +44,36 @@ test("the plugin's own code sets no style, href or src", () => {
   const ATTR = /\s(?:style|href|src)=["'{]|\bstyle:\s*\{|\.style(?:\.\w+)?\s*(?:=(?!=)|\[)/;
   assert.ok(own.length >= 10);
   for (const [n, src] of own) assert.equal(ATTR.test(src), false, `${n}: ${src.match(ATTR)?.[0]}`);
+});
+
+test('no code writes style, href or src through the DOM', () => {
+  // setAttribute, a property assignment, or a CSSOM setProperty, in any page code (copied components included).
+  const DOM_WRITE = /setAttribute\(\s*['"`](?:style|href|src)['"`]|\.(?:src|href)\s*=(?!=)|\.style\.setProperty\(/;
+  assertPattern(DOM_WRITE,
+    ["el.setAttribute('href', u)", 'el.setAttribute("src", u)', 'el.setAttribute(`style`, s)', 'img.src = url', 'a.href=url', "el.style.setProperty('color', c)"],
+    ['src.buffer = buf', 'const src = ctx.createBufferSource()', 'a.src === b', 'el.setAttribute("aria-busy", "true")', "a.hrefLang = 'en'", 'audio.srcObject = stream']);
+  assert.ok(srcCode.length >= 15);
+  for (const [n, src] of srcCode) assert.equal(DOM_WRITE.test(src), false, `${n}: ${src.match(DOM_WRITE)?.[0]}`);
+});
+
+test('no code creates a <style> element', () => {
+  const STYLE_EL = /createElement\(\s*['"`]style['"`]|<style[\s>/]/i;
+  assertPattern(STYLE_EL, ["document.createElement('style')", 'document.createElement( "STYLE" )', '<style>{css}</style>', '<style jsx>', '<style/>'],
+    ["document.createElement('div')", '<span data-style="x">', 'const styles = 1']);
+  for (const [n, src] of srcCode) assert.equal(STYLE_EL.test(src), false, `${n}: ${src.match(STYLE_EL)?.[0]}`);
+});
+
+test('main.tsx builds exactly one controller, at module level, before createRoot', () => {
+  const main = files.find(([n]) => n === 'src/main.tsx')[1];
+  const calls = [...main.matchAll(/createAppController\(/g)];
+  assert.equal(calls.length, 1, 'one controller');
+  const decl = main.match(/^const (\w+) = createAppController\(\);$/m);
+  assert.ok(decl, 'a top-level statement of its own, outside any function or JSX');
+  const root = main.indexOf('createRoot(');
+  assert.ok(root > decl.index, 'built before createRoot');
+  assert.equal(main.slice(root).includes('createAppController'), false, 'not inside the rendered tree');
+  assert.match(main.slice(root), new RegExp(`<App controller=\\{${decl[1]}\\} />`), 'the tree receives that one controller');
+  for (const [n, src] of srcCode) if (n !== 'src/main.tsx') assert.equal(/createAppController\(/.test(src.replace(/export function createAppController\(/, '')), false, `${n} builds a controller`);
 });
 
 test('no root-relative URL in the page code', () => {
