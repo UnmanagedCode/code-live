@@ -5,8 +5,7 @@
 // Every event costs O(1): entries are appended in place, a streamed chunk
 // replaces only its own entry object (every other entry keeps its identity),
 // and listeners are told which part changed. The list of ids changes only when
-// an entry is added; one entry's subscribers hear only about that entry. The
-// array snapshots are copied lazily, once per change, and only when read.
+// an entry is added; one entry's subscribers hear only about that entry.
 
 const LABELS = {
   you: 'You',
@@ -29,29 +28,23 @@ const JSON_KINDS = new Set(['tool_call', 'tool_result']);
 export function createTranscriptStore() {
   /** @type {Entry[]} */
   const entries = [];
-  /** @type {Map<number, Entry>} */
-  const byId = new Map();
-  const anyListeners = new Set(); // every change
+  /** @type {Map<number, number>} */
+  const position = new Map(); // entry id -> its index in `entries`
   const listListeners = new Set(); // an entry was added
   /** @type {Map<number, Set<() => void>>} */
   const entryListeners = new Map(); // one entry changed
   let nextId = 1;
   let stream = null; // {kind, id} of the bubble currently receiving chunks
-  /** @type {Entry[] | null} */
-  let entriesCopy = null;
   /** @type {number[] | null} */
-  let idsCopy = null;
+  let idsCopy = null; // the ids array getIds hands out, rebuilt after an add
 
   const call = (set) => { for (const fn of [...set]) fn(); };
 
   /** @param {Entry} entry */
   function push(entry) {
-    entries.push(entry);
-    byId.set(entry.id, entry);
-    entriesCopy = null;
+    position.set(entry.id, entries.push(entry) - 1);
     idsCopy = null;
     call(listListeners);
-    call(anyListeners);
     return entry.id;
   }
 
@@ -59,14 +52,9 @@ export function createTranscriptStore() {
   const listen = (set, fn) => { set.add(fn); return () => { set.delete(fn); }; };
 
   return {
-    /** Every change. */
-    subscribe: (/** @type {() => void} */ fn) => listen(anyListeners, fn),
-    /** All entries, in order; a new array after every change. @returns {Entry[]} */
-    getSnapshot: () => (entriesCopy ??= entries.slice()),
-
     /** Entries added (not chunks). */
     subscribeIds: (/** @type {() => void} */ fn) => listen(listListeners, fn),
-    /** The entry ids, in order; a new array only when an entry is added. @returns {number[]} */
+    /** The entry ids, in order: the same array until an entry is added. @returns {number[]} */
     getIds: () => (idsCopy ??= entries.map((e) => e.id)),
 
     /** Changes to entry `id` only. */
@@ -80,7 +68,7 @@ export function createTranscriptStore() {
       };
     },
     /** @param {number} id @returns {Entry | undefined} */
-    getEntry: (id) => byId.get(id),
+    getEntry: (id) => { const at = position.get(id); return at === undefined ? undefined : entries[at]; },
 
     // meta.title labels conductor entries (meta.ask adds `question` or `plan`);
     // meta.name labels tool entries.
@@ -96,23 +84,27 @@ export function createTranscriptStore() {
       return push({ id: nextId++, kind, label, body, mono });
     },
 
-    // Merges consecutive transcription chunks of one speaker into one bubble.
-    // The streamed bubble is always the last entry: anything added ends the stream.
+    // Merges consecutive transcription chunks of one speaker into one bubble;
+    // anything added ends the stream. The chunk goes to its bubble by id, and
+    // the stream is set before push() notifies, so a listener that re-enters the
+    // store during that notification cannot split or misplace the bubble.
     /** @param {string} kind @param {string} chunk */
     appendStream(kind, chunk) {
       if (!STREAMED.has(kind)) return this.add(kind, chunk);
-      if (!stream || stream.kind !== kind) {
-        stream = { kind, id: push({ id: nextId++, kind, label: LABELS[kind], body: '', mono: false }) };
+      let id;
+      if (stream && stream.kind === kind) {
+        id = stream.id;
+      } else {
+        id = nextId++;
+        stream = { kind, id };
+        push({ id, kind, label: LABELS[kind], body: '', mono: false });
       }
-      const last = /** @type {Message} */ (entries[entries.length - 1]);
-      const next = { ...last, body: last.body + String(chunk) };
-      entries[entries.length - 1] = next;
-      byId.set(next.id, next);
-      entriesCopy = null;
-      const set = entryListeners.get(next.id);
+      const at = /** @type {number} */ (position.get(id));
+      const prev = /** @type {Message} */ (entries[at]);
+      entries[at] = { ...prev, body: prev.body + String(chunk) };
+      const set = entryListeners.get(id);
       if (set) call(set);
-      call(anyListeners);
-      return stream.id;
+      return id;
     },
 
     endTurn() { stream = null; },

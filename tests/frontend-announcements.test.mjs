@@ -25,7 +25,7 @@ async function setup(state) {
   const hosts = [];
   const session = { state, sendText: (t) => sent.push(t) };
   installAnnouncements({ eventSource: es, transcript, session, hostIndicator: { set: (c) => hosts.push(c) } });
-  const entries = () => transcript.getSnapshot();
+  const entries = () => transcript.getIds().map((id) => transcript.getEntry(id));
   return { entries, es, sent, hosts, session, ANNOUNCE_PREFIX, ASK_QUESTION_MARK, ASK_PLAN_MARK };
 }
 

@@ -12,7 +12,7 @@ async function setup(now) {
   const played = [];
   let flushed = 0;
   const view = createSessionView({ now, transcript, player: { enqueue: (b) => played.push(b), flush: () => { flushed++; } } });
-  const entries = () => transcript.getSnapshot();
+  const entries = () => transcript.getIds().map((id) => transcript.getEntry(id));
   const bubbles = () => entries().filter((e) => e.kind === 'gemini').map((e) => e.body);
   return { view, entries, bubbles, played, flushed: () => flushed, isReplyEnd };
 }

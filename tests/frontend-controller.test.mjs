@@ -13,6 +13,8 @@ import { createAppController } from '../frontend/src/lib/controller.js';
 import { settingsLocked } from '../frontend/src/lib/controls.js';
 
 const tick = () => new Promise((r) => setImmediate(r));
+// The transcript's entries in order, read the way the Transcript component reads them.
+const entriesOf = (tr) => tr.getIds().map((id) => tr.getEntry(id));
 async function until(fn, what) {
   for (let i = 0; i < 200; i++) { if (fn()) return; await tick(); }
   throw new Error(`timed out waiting for ${what}`);
@@ -153,7 +155,7 @@ test('connects again from error, and the error detail lands in the transcript as
     await t.c.toggleConnect();
     await until(() => t.state() === 'error', 'error');
   } finally { t.FakeSocket.rejectSetup = false; }
-  const last = t.c.transcript.getSnapshot().at(-1);
+  const last = entriesOf(t.c.transcript).at(-1);
   assert.deepEqual([last.kind, last.body], ['error', 'Gemini closed the connection (1008: invalid token)']);
   await goLive(t);
   assert.equal(t.mints().length, 2);
@@ -219,7 +221,7 @@ for (const name of ['NotAllowedError', 'SecurityError']) {
     const t = await build({ gum: () => (refuse ? Promise.reject(Object.assign(new Error('Permission denied'), { name })) : Promise.resolve({ getTracks: () => [] })) });
     await t.c.toggleConnect();
     await until(() => t.c.store.get().micBlocked, 'micBlocked');
-    assert.equal(t.c.transcript.getSnapshot().at(-1).body, 'Microphone: Permission denied');
+    assert.equal(entriesOf(t.c.transcript).at(-1).body, 'Microphone: Permission denied');
     refuse = false;
     t.sockets[0].server({ sessionResumptionUpdate: { newHandle: 'h1', resumable: true } });
     t.sockets[0].server({ goAway: { timeLeft: '5s' } });
@@ -239,7 +241,7 @@ test('Disconnect clears micBlocked; another microphone failure does not set it',
   assert.equal(t.c.store.get().micBlocked, false);
   err = Object.assign(new Error('no device'), { name: 'NotFoundError' });
   await t.c.toggleConnect();
-  await until(() => t.c.transcript.getSnapshot().some((e) => e.body === 'Microphone: no device'), 'error line');
+  await until(() => entriesOf(t.c.transcript).some((e) => e.body === 'Microphone: no device'), 'error line');
   assert.equal(t.c.store.get().micBlocked, false);
 });
 
@@ -248,7 +250,7 @@ test('a failed models load sets modelsError and adds the transcript line; a fail
   const t = await build({ routes: { 'GET api/models': fail, 'GET api/settings': fail } });
   assert.equal(t.c.store.get().modelsError, 'backend restarting');
   assert.deepEqual(t.c.store.get().models, []);
-  assert.ok(t.c.transcript.getSnapshot().some((e) => e.kind === 'error' && e.body === 'Loading models failed: backend restarting'));
+  assert.ok(entriesOf(t.c.transcript).some((e) => e.kind === 'error' && e.body === 'Loading models failed: backend restarting'));
   assert.equal(t.c.settings.store.get().loadError, 'backend restarting');
 });
 
@@ -270,7 +272,7 @@ test('a conductor announce while live is injected into the session and added to 
   const t = await build();
   await goLive(t);
   t.eventSources[0].emit('announce', { sessionId: 'c', title: 'Alpha', text: 'done' });
-  assert.equal(t.c.transcript.getSnapshot().at(-1).label, 'Conductor · Alpha');
+  assert.equal(entriesOf(t.c.transcript).at(-1).label, 'Conductor · Alpha');
   assert.ok(t.sockets[0].sent.some((m) => m.realtimeInput?.text === 'CONDUCTOR UPDATE from "Alpha" (session c):\ndone'));
 });
 
