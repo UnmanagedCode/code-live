@@ -16,7 +16,12 @@ Details: [docs/features.md](docs/features.md).
 
 ## Install and enable
 
-code-live must be a registered code-conductor project, so the host's plugin discovery finds it. No Library install is needed. The runtime has no dependencies (`npm install` is only for tests). With `$CC` as the code-conductor URL:
+code-live must be a registered code-conductor project, so the host's plugin discovery finds it. Installing it from the Library is optional; any registered checkout works. The backend has no runtime dependencies, but the page is built, by `npm install` in the checkout (it installs the devDependencies and builds `frontend/dist` through `prepare`):
+
+- **Installed from the Library:** the Library's install and update hooks run `npm install` for you.
+- **Any other checkout:** run `npm install` yourself, and again after every pull. Until it has run, the page answers `503 UI not built — run npm install`.
+
+Then enable it. With `$CC` as the code-conductor URL:
 
 ```sh
 curl -X POST $CC/api/plugins/rescan
@@ -77,12 +82,17 @@ The same reconcile runs when the host link reconnects and when the backend start
 ## Run and test
 
 ```sh
+npm install      # devDependencies, then `prepare` builds frontend/dist
 npm start        # node server.js (normally the host starts it)
-npm install      # dev dependencies for tests only (happy-dom, ws)
-npm test         # full suite; the real-Gemini and real-host smoke tests are skipped
-node tests/run.mjs tests/tools.test.mjs            # one file
+npm test         # node:test suite, then tsc -p frontend, then vitest; the real-Gemini and real-host smoke tests are skipped
+npm run prepare  # rebuild frontend/dist (restart the backend to serve it)
+npm run dev      # Vite dev server with api/ proxied to PLUGIN_BACKEND (default http://127.0.0.1:7300); run `PORT=7300 npm start` beside it
+node tests/run.mjs tests/tools.test.mjs            # one node test file
+npx vitest run --config frontend/vitest.config.ts frontend/src/App.integration.test.tsx   # one web test file
 RUN_REAL_GEMINI=1 GEMINI_API_KEY=… node tests/run.mjs tests/real-gemini.test.mjs
 ```
+
+In a git worktree there is no `node_modules`: run `npm install` there (or symlink a checkout's whose versions match), then `npm run prepare`, because `tests/dist.test.mjs` checks the real build.
 
 The real smoke test reads the key only from `GEMINI_API_KEY`. Pass it inline and never write it to a file.
 
@@ -107,7 +117,10 @@ The backend exits with an error if `PROJECTS_ROOT` or `CONDUCTOR_URL` is missing
 - The microphone needs a secure context: `http://localhost`, `http://127.0.0.1` or `https`.
 - **code-live calls the host's bare `POST /mcp`** for announcement text, `read_conductor_messages`, and answering or deciding plans. That is not part of the plugin API, so a host change can break it without any manifest-level signal. Announcements and reads then fall back to the events text (logged, as they also do when a later turn has already spoken); answering and deciding fail with `HOST_*` codes. All of it is in `src/hostMcp.js`, so moving to a sanctioned host-tool path touches that module and the manifest only.
 - Plan approval requires `confirmed: true`, which the system prompt allows only after the user's spoken yes. That guards against a misheard utterance; it is not a security boundary. Conductor-written text reaches Gemini's conversation and could itself prompt an approval, but that grants nothing a conductor cannot already do through the open host API. The same holds for the system prompt's rule that only spoken audio is the user and that Gemini never acts on its own: it is prompt guidance, and nothing checks a tool call against your speech.
-- The host API has no auth, and the same-origin plugin iframe could drive all of code-conductor. The mitigations are DOM-text-only rendering of model output and a strict CSP.
+- The host API has no auth, and the same-origin plugin iframe could drive all of code-conductor. The mitigations are rendering model output only as React text (no markup, attributes or links built from it) and a strict CSP with no `'unsafe-inline'`.
+- **The UI build needs the devDependencies and Node ≥ 22.12.** Under `NODE_ENV=production` or `npm_config_omit=dev` (inherited by the Library's install hook from code-conductor's environment), `vite` is not installed and `prepare` fails; the page then answers `503 UI not built — run npm install` until a build succeeds.
+- **A rebuild while the backend runs is served only after a restart** (the file list is read at startup). code-conductor's Update restarts it.
+- **Standalone (outside code-conductor) the page uses the system font** and follows the OS colour scheme: the Geist fonts and the live theme come from code-conductor's `/pluginTheme.css`, which 404s standalone.
 - Every open Code Live tab injects each announcement into its own Gemini session, so two live tabs speak it twice.
 - Only **live** conductor sessions (those in `GET /api/instances`) are listed or addressable.
 - **A conductor is announced only after code-live acts on it, and stops only when it ends.** Listing or reading never starts announcing it, and there is no tool to stop announcing a live one. After an upgrade from a single-target `state.json`, nothing is announced until a conductor is acted on again.

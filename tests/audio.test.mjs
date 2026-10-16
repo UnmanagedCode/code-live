@@ -2,7 +2,7 @@
 // (24 kHz PCM16 out) keep length, clamp and round-trip correctly.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { downsample, floatToPcm16, pcm16ToFloat, bytesToBase64, base64ToBytes, pcm16ToBase64, base64ToPcm16, createChunker } from '../public/audio.js';
+import { downsample, floatToPcm16, pcm16ToFloat, bytesToBase64, base64ToBytes, pcm16ToBase64, base64ToPcm16, createChunker } from '../frontend/src/lib/audio.js';
 
 test('downsample keeps the rate ratio and interpolates', () => {
   const input = Float32Array.from({ length: 480 }, (_, i) => i / 480);

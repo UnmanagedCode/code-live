@@ -1,16 +1,17 @@
 // Pins: once stored, the Gemini key never leaves the backend except in the
 // x-goog-api-key header to Gemini. Every route in ROUTES (a new route fails
-// this test until it is probed here), every static file, and the error paths
-// are checked for the key and its prefix.
+// this test until it is probed here), every static file of a fixture UI build
+// (so the sweep never depends on frontend/dist being built), and the error
+// paths are checked for the key and its prefix.
 import { test } from 'node:test';
+import { promises as fs } from 'node:fs';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { readdirSync } from 'node:fs';
 import { ROUTES } from '../src/routes.js';
 import { CUSTOM_PROMPT_MAX } from '../src/prefsStore.js';
 import { startFakeGemini } from './fakes/fakeGemini.mjs';
 import { startFakeHost } from './fakes/fakeHost.mjs';
-import { startApp, req, SENTINEL_KEY, CONDUCTOR_A, WORKER } from './helpers.mjs';
+import { startApp, req, fixtureDist, SENTINEL_KEY, CONDUCTOR_A, WORKER } from './helpers.mjs';
 
 const PREFIX = SENTINEL_KEY.slice(0, 12);
 
@@ -27,8 +28,9 @@ function firstSseChunk(url) {
 test('the stored key never appears in any response', async (t) => {
   const gemini = await startFakeGemini();
   const host = await startFakeHost({ instances: [CONDUCTOR_A, WORKER] });
-  const app = await startApp({ gemini, host });
-  t.after(async () => { await app.stop(); await host.close(); await gemini.close(); });
+  const dist = await fixtureDist();
+  const app = await startApp({ gemini, host, distDir: dist });
+  t.after(async () => { await app.stop(); await host.close(); await gemini.close(); await fs.rm(dist, { recursive: true, force: true }); });
   await app.deps.keyStore.set(SENTINEL_KEY);
   const u = (p) => `${app.url}${p}`;
   const setKey = () => req(u('/api/settings/api-key'), { method: 'PUT', body: { apiKey: SENTINEL_KEY } });
@@ -80,7 +82,14 @@ test('the stored key never appears in any response', async (t) => {
 
   const responses = [];
   for (const probe of Object.values(probes)) responses.push(...await Promise.all(await probe()));
-  for (const f of readdirSync(new URL('../public/', import.meta.url))) responses.push(await req(u(`/${f}`)));
+  const swept = [];
+  for (const p of app.deps.staticFiles.keys()) {
+    const r = await req(u(p));
+    assert.equal(r.status, 200, p);
+    swept.push(p);
+    responses.push(r);
+  }
+  assert.deepEqual(swept.sort(), ['/', '/assets/index-Ab_1-z.js', '/assets/index-Cd2.css', '/index.html', '/mic-worklet.js', '/theme-init.js'], 'the sweep covered every file the fixture build serves');
   responses.push(await req(u('/missing')), await req(u('/')));
 
   assert.ok(responses.length > 30);

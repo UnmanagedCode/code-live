@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { loadConfig } from '../src/config.js';
 import { createGemini } from '../src/gemini.js';
 import { MODELS } from '../src/models.js';
-import { createLiveSession } from '../public/liveSession.js';
+import { createLiveSession } from '../frontend/src/lib/liveSession.js';
 
 const RUN = process.env.RUN_REAL_GEMINI === '1';
 // On the real API this model usually never delivers a toolCall: after its

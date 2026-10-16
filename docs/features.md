@@ -6,12 +6,23 @@ User-facing behavior of the Code Live page and its voice tools. Wire shapes are 
 
 | region | contents |
 |---|---|
-| status bar | session state pill (`idle`, `connecting`, `live`, `reconnecting`, `error`) the `Mic paused` pill (shown only while the mic is paused), and the host indicator (`Host connected` / `Host disconnected`: the backend's link to code-conductor's `/ws`) |
-| controls | **Model** select (the pinned models from `GET api/models`; a model with a `hint` shows it after the label, e.g. `Gemini 3.8 Live Extended Thinking (tool calls usually fail)`), **Connect** (one button: `Connect`, `Connecting...` while connecting, a red `Disconnect` while `live` or `reconnecting`), **Pause mic** / **Resume mic** |
-| transcript | You / Gemini transcription bubbles, tool calls and results as JSON, conductor announcements, status and error lines, and a `New session started · <time>` divider at the start of each session (not on a resume) |
-| Settings (collapsible) | **Gemini API key** heading over a password field, **Save**, **Clear**, and the status `Key set (••••<last 4>)` or `No key set`. **Voice** select. **Custom instructions** textarea with **Save**. See [Voice and custom instructions](#voice-and-custom-instructions) |
+| status bar | session state badge (`idle`, `connecting`, `live`, `reconnecting`, `error`), the `Mic paused` badge (shown only while the mic is paused), and the host badge (`Host connected` / `Host disconnected`: the backend's link to code-conductor's `/ws`) |
+| controls | **Model** select (the pinned models from `GET api/models`; a model with a `hint` shows it after the label, e.g. `Gemini 3.8 Live Extended Thinking (tool calls usually fail)`; disabled with `Loading models…` beside it until they arrive, or `Models unavailable` when they failed to load), **Connect** (one button: `Connect`, `Connecting...` with a spinner while connecting, a red `Disconnect` while `live` or `reconnecting`), **Pause mic** / **Resume mic** |
+| notices | shown only when they apply; see [Notices](#notices) |
+| transcript | You / Gemini transcription bubbles (yours on the right), tool calls and results as JSON, conductor announcements, status and error lines, and a `New session started · <time>` divider at the start of each session (not on a resume). Empty, it shows `Press Connect and start talking.` It scrolls to the newest entry on every change |
+| Settings (collapsible, closed on load) | **Gemini API key** heading over a password field, **Save** (or Enter in the field), **Clear**, and the status `Key set (••••<last 4>)` or `No key set`. **Voice** select. **Custom instructions** textarea with **Save**. Every control is disabled until the settings have loaded. See [Voice and custom instructions](#voice-and-custom-instructions) |
 
-The page is dark-only and uses code-conductor's shell colours, whatever the OS colour scheme.
+- **Theme:** inside code-conductor the page follows its light/dark theme live, including a switch made while the page is hidden. Standalone (outside code-conductor) it follows the OS colour scheme. It has no theme control of its own.
+- **Phone width:** the badges wrap, the model select takes the full width, Connect and Pause share a row at 40 px tall, and bubbles take at most 85 % of the width.
+- **Keyboard:** Tab follows reading order: Model, Connect, Pause, the no-key notice's **Open Settings** when shown, the transcript (a scrollable region), the Settings summary, then the key field, Save, Clear, Voice, Custom instructions, Save. Disabled controls are skipped. Every control has a visible label or text, and focus shows a ring.
+
+## Notices
+
+| notice | when | text |
+|---|---|---|
+| no key (info) | the settings loaded and no key is stored | `No Gemini API key set. Add one in Settings to connect.` with an **Open Settings** button that opens Settings and focuses the key field. Connect stays enabled |
+| backend down (error) | `GET api/models` or the settings load failed | `Can't reach the code-live backend: <message>. Reload the page once it is back.` The transcript also gets its error line |
+| microphone blocked (error) | the browser refused the microphone permission (`NotAllowedError` or `SecurityError`) | `Microphone blocked: allow microphone access for this page, then Disconnect and Connect again.` It clears when a capture starts or on Disconnect. The transcript line `Microphone: <message>` stays |
 
 ## Connecting
 
@@ -39,7 +50,7 @@ The page is dark-only and uses code-conductor's shell colours, whatever the OS c
 
 ## Pausing the microphone
 
-- **Pause mic** is enabled while the session is `live` or `reconnecting`. It toggles to **Resume mic**, and the `Mic paused` pill shows while paused.
+- **Pause mic** is enabled while the session is `live` or `reconnecting`. It toggles to **Resume mic**, and the `Mic paused` badge shows while paused.
 - A pause stops sending your audio and tells Gemini the audio stream ended. The connection, the conversation and resumption are unaffected.
 - Gemini finishes what it is saying, and conductor announcements are still spoken. You cannot interrupt Gemini by voice while paused.
 - The pause is kept across reconnects (`goAway` or a drop).
@@ -103,6 +114,6 @@ The manifest sets `frontend.keepAlive`, so code-conductor keeps the Code Live pa
 
 - **A live call keeps running** while you are elsewhere in code-conductor: the microphone stays open, Gemini keeps listening, and conductor announcements are still spoken.
 - **Gemini can act on what the open microphone hears** (send prompts; an approval still needs a spoken yes, which can be overheard) while no Code Live UI is on screen. The code-conductor switcher shows `Code Live (running)` and the browser shows its recording indicator. Use **Pause mic** or **Disconnect** before leaving if that is not wanted.
-- **A call that ends while the page is hidden** (resume attempts exhausted, Gemini closing the socket) goes to `error` and stops the microphone. The `error` pill and a transcript line are there when you return.
+- **A call that ends while the page is hidden** (resume attempts exhausted, Gemini closing the socket) goes to `error` and stops the microphone. The `error` badge and a transcript line are there when you return.
 - **What ends the page:** Stop or Disable of the plugin, a Restart or Update from Settings → Plugins, a version switch, or reloading the browser tab. The call ends with it.
 - **A call survives a backend restart that completes within the resume window** (the spaced resume attempts described under Connecting). The Gemini socket does not go through the backend, so a restart alone doesn't touch it; only a `goAway` or socket drop needs the backend, for a fresh token. If one lands while the backend is down longer than that window, the call ends in `error`. The page's event stream reconnects by itself (retrying with a growing delay while the host answers 502/503), announcements made while the backend was down are replayed, and a tool call made in that window returns `CLIENT_ERROR` to Gemini. A Gemini resume in that window waits and retries (see Connecting).

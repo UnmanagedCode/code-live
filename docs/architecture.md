@@ -5,7 +5,7 @@
 ```
 browser (Code Live page)                       code-live backend (node:http)            code-conductor host
 ┌──────────────────────────┐   api/…, SSE     ┌──────────────────────────────┐  REST    ┌──────────────┐
-│ app.js wiring            │ ───────────────▶ │ routes → service / gemini    │ ───────▶ │ /api/…       │
+│ controller.js + React UI │ ───────────────▶ │ routes → service / gemini    │ ───────▶ │ /api/…       │
 │ liveSession.js ──────────┼──┐              │ announcer ◀── ccLink (/ws) ◀─┼───────── │ /ws, /mcp    │
 └──────────────────────────┘  │ wss (token)   └──────────────┬───────────────┘          └──────────────┘
                               ▼                              │ auth_tokens (x-goog-api-key)
@@ -15,7 +15,8 @@ browser (Code Live page)                       code-live backend (node:http)    
 - **Audio goes straight from the browser to Gemini** over the Live WebSocket, authorized by a single-use ephemeral token that the backend mints. Every pinned model supports ephemeral tokens, so no backend relay is needed.
 - **The token carries the whole setup:** model, tools, system prompt and resumption handle. With `bidiGenerateContentSetup` set and no `fieldMask`, Gemini ignores the client's setup, so the page cannot change the tools or prompt.
 - **Tool calls arrive in the browser**, which forwards them to `POST api/tools/call`. The backend runs them against the host and the page sends the result back as `toolResponse`.
-- **Zero runtime dependencies:** raw `node:http` plus Node ≥ 22's global `fetch` and `WebSocket`. The frontend is vanilla ES modules with no build step.
+- **Zero runtime dependencies:** the backend is raw `node:http` plus Node's global `fetch` and `WebSocket`. The frontend is React + Vite + Tailwind v4 with copied shadcn/Radix components and lucide icons, following the reference setup in code-conductor's `docs/plugin-ui.md` (Part 3); all of it is devDependencies, bundled into `frontend/dist` at install.
+- **Theme:** `frontend/index.html` loads the host's `/pluginBridge.js` (blocking, first), `/pluginTheme.css`, then `theme-init.js`. Embedded, the bridge mirrors code-conductor's `.dark` class and `data-cc-theme` onto the page's `<html>` and keeps them in sync, hidden frames included; the unlayered host sheet supplies the tokens. Standalone, `theme-init.js` follows `prefers-color-scheme` over `src/cc-theme-fallback.css`, a one-time snapshot of the host tokens inside `@layer base` (never synced). Colours come only from the tokens.
 
 ## Modules
 
@@ -43,21 +44,32 @@ browser (Code Live page)                       code-live backend (node:http)    
 | `src/http.js` | security headers, JSON body reading, the static allowlist |
 | `src/routes.js` | `ROUTES`, the HTTP API table |
 
-| frontend file | responsibility |
+The frontend is split in two: **plain DOM-free ES modules** in `frontend/src/lib/*.js` (logic, imported unchanged by the `node:test` suites) and **React components** in `frontend/src/components/` that render their state and call their actions. `main.tsx` builds the one controller **before** `createRoot`, so the session, the mic, the AudioContext and the event stream live outside every component: StrictMode's doubled effects open nothing twice, and nothing stops when code-conductor hides the keep-alive page. No code listens for `visibilitychange` or `pagehide`.
+
+| frontend file (`frontend/`) | responsibility |
 |---|---|
-| `public/app.js` | wiring only: builds the modules, connects the buttons, reflects session state (and locks the Settings voice and instructions controls while `connecting`, `live` or `reconnecting`), runs the mic (AudioWorklet → 100 ms chunks → 16 kHz PCM16 base64, frames discarded while the mic is paused) and playback |
-| `public/liveSession.js` | DOM-free Gemini Live client: states, message → event mapping, tool round-trip, cancellation, reconnect (`reconnect()`), the mic pause flag (`pauseMic`/`resumeMic`/`micPaused`, kept across `live ⇄ reconnecting`, cleared on any other state), the bounded `setupComplete` wait (`setupTimeoutMs`, injectable `timers`), the spacing of resume attempts (`resumeDelayMs`, doubling, up to `maxResumeFailures`; a Disconnect during the wait ends the loop), and `disconnect()` from any state |
-| `public/connectControl.js` | the single Connect / Connecting... / Disconnect button, rendered from `session.state`; disabled while `connecting` |
-| `public/micControl.js` | Pause/Resume mic button and `Mic paused` pill, rendered from `session.state` + `session.micPaused` |
-| `public/sessionView.js` | session events → transcript and speaker; `isReplyEnd` (a `turnComplete` with `interactionStatus: IN_PROGRESS` doesn't end the bubble); the new-session divider on `connecting → live` (injectable `now`) |
-| `public/api.js` | backend client (relative URLs, `cache:'no-store'`); the token request alone carries a timeout (`TOKEN_TIMEOUT_MS`, injectable as `tokenTimeoutMs`), after which it rejects with `No response from the backend within <n> s` |
-| `public/styles.css` | the page's only stylesheet, dark-only. Its `:root` tokens are copied from the `:root` block of code-conductor's shell `public/styles.css`, because the host provides no theme to the plugin iframe |
-| `public/transcript.js` | transcript rendering, merging streamed transcription chunks, `divider(text)` |
-| `public/settings.js` | the Settings pane: the key, the voice select (saves on `change`) and the custom-instructions textarea with Save. `installSettings` returns `{ready, setLocked}`; `setLocked` disables the voice and instructions controls, not the key's |
-| `public/events.js` | `createEventStream`: an EventSource wrapper for `api/events` (same `addEventListener` surface). A native source stops for good when a reconnect gets a non-2xx reply, so on an `error` with `readyState` CLOSED it creates a new source after `retryMs` (doubling to `maxRetryMs`, reset on `open`; injectable `timers`), re-attaches every registered listener and passes the last non-empty event id as `?lastEventId=`. An `error` while CONNECTING is left to the native retry |
-| `public/announcements.js` | SSE → transcript and `sendText`; `ANNOUNCE_PREFIX`, `ASK_QUESTION_MARK`, `ASK_PLAN_MARK` and the footer line for an `ask`. Conductor-written title, text and plan path are made inert before they enter the injected header, body or footer (see [protocol](protocol.md#live-socket); look-alike letters and markdown-decorated markers are accepted residual risk) |
-| `public/audio.js`, `public/player.js`, `public/mic-worklet.js` | PCM conversion, `createChunker` (100 ms chunk buffering), gapless 24 kHz playback, the `pcm-capture` worklet |
-| `public/dom.js` | the `el(tag, props, children)` builder; non-node children become text nodes |
+| `index.html`, `public/theme-init.js` | the host URLs, the standalone OS-theme follower, the module entry |
+| `src/main.tsx` | builds `createAppController()` once, then renders `<App>` in StrictMode |
+| `src/lib/controller.js` | `createAppController(env)`: the page wiring. Builds the api, transcript store, settings, session view, live session, mic capture, event stream and announcements; its store holds `{state, micPaused, hostConnected, models, modelsError, modelId, micBlocked}`. Actions: `toggleConnect()` (connects from `idle`/`error`, disconnects from `live`/`reconnecting`, nothing while `connecting`; creates and resumes the AudioContext inside the click, for the user-gesture rule), `toggleMic()`, `setModel(id)`. `env` injects `fetchImpl`, `WebSocketImpl`, `EventSourceImpl`, `AudioContextImpl`, `AudioWorkletNodeImpl`, `mediaDevices` and `now`, each defaulting to the browser's |
+| `src/lib/store.js`, `src/lib/useStore.ts` | `createStore(initial)` → `{get, set(patch), subscribe}` (each `set` publishes a new snapshot); `useStore(store, selector?)` over `useSyncExternalStore` |
+| `src/lib/transcriptStore.js` | the transcript as data, `{id, kind, label, body, mono}` entries plus `{id, kind:'divider', text}`; `add`, `appendStream` (merges consecutive chunks of one speaker), `endTurn`, `divider`. Every event is O(1): entries are appended in place and a chunk replaces only its own entry object (the others keep their identity). Readers: `subscribeIds`/`getIds` (notified, and a new ids array, only when an entry is added), `subscribeEntry(id)`/`getEntry(id)` (that entry only). A chunk's listener that appends again during the notification extends the same bubble |
+| `src/lib/settings.js` | `createSettings(api)`: the key, voice and custom-instructions state and actions (`load`, `saveKey`, `clearKey`, `setVoice` restoring the previous choice on failure, `savePrompt` keeping the draft on failure), with each status line's exact text |
+| `src/lib/controls.js` | pure views: `connectButtonView(state)`, `micButtonView(state, paused)`, `settingsLocked(state)` (true while `connecting`, `live` or `reconnecting`) |
+| `src/lib/micCapture.js` | `createMicCapture(...)`: getUserMedia → the `pcm-capture` worklet (loaded by the relative URL `mic-worklet.js`) → 100 ms chunks → 16 kHz PCM16 base64, frames and the partial chunk discarded while paused. One capture per session through a claim taken before the first await; a stop releases whatever a start has acquired so far, at once; a failure releases the stream |
+| `src/lib/liveSession.js` | DOM-free Gemini Live client: states, message → event mapping, tool round-trip, cancellation, reconnect (`reconnect()`), the mic pause flag (`pauseMic`/`resumeMic`/`micPaused`, kept across `live ⇄ reconnecting`, cleared on any other state), the bounded `setupComplete` wait (`setupTimeoutMs`, injectable `timers`), the spacing of resume attempts (`resumeDelayMs`, doubling, up to `maxResumeFailures`; a Disconnect during the wait ends the loop), and `disconnect()` from any state |
+| `src/lib/sessionView.js` | session events → transcript and speaker; `isReplyEnd` (a `turnComplete` with `interactionStatus: IN_PROGRESS` doesn't end the bubble); the new-session divider on `connecting → live` (injectable `now`) |
+| `src/lib/api.js` | backend client (relative URLs, `cache:'no-store'`); the token request alone carries a timeout (`TOKEN_TIMEOUT_MS`, injectable as `tokenTimeoutMs`), after which it rejects with `No response from the backend within <n> s` |
+| `src/lib/events.js` | `createEventStream`: an EventSource wrapper for `api/events` (same `addEventListener` surface). A native source stops for good when a reconnect gets a non-2xx reply, so on an `error` with `readyState` CLOSED it creates a new source after `retryMs` (doubling to `maxRetryMs`, reset on `open`; injectable `timers`), re-attaches every registered listener and passes the last non-empty event id as `?lastEventId=`. An `error` while CONNECTING is left to the native retry |
+| `src/lib/announcements.js` | SSE → transcript and `sendText`; `ANNOUNCE_PREFIX`, `ASK_QUESTION_MARK`, `ASK_PLAN_MARK` and the footer line for an `ask`. Conductor-written title, text and plan path are made inert before they enter the injected header, body or footer (see [protocol](protocol.md#live-socket); look-alike letters and markdown-decorated markers are accepted residual risk) |
+| `src/lib/audio.js`, `src/lib/player.js`, `public/mic-worklet.js` | PCM conversion, `createChunker` (100 ms chunk buffering), gapless 24 kHz playback, the `pcm-capture` worklet (a static file copied verbatim into `dist/`, so it stays a plain AudioWorklet module) |
+| `src/App.tsx`, `src/components/*.tsx` | `StatusBar` (badges), `SessionControls` (model select, Connect, Pause), `Notices` (no key, backend down, microphone blocked), `Transcript` (renders entries as text in `memo` bubbles that each subscribe to their own entry, so a chunk re-renders one bubble; scrolls to the end on every change), `SettingsPane` (native `<details>`; the key input is uncontrolled and read once on Save or Enter) |
+| `src/components/ui/*.tsx`, `src/lib/utils.ts` | components copied from code-conductor's `web/src/components/ui/` on first use, and its `cn()` |
+
+## Build on install
+
+- `npm install` installs the devDependencies and runs `prepare` (`vite build --config frontend/vite.config.ts`), which writes `frontend/dist`: `index.html`, `theme-init.js`, `mic-worklet.js` and the hashed `assets/index-*.js` / `.css`. No source maps.
+- `frontend/dist/` and `package-lock.json` are gitignored, so an installed checkout stays clean and code-conductor's Update (`git pull --ff-only`) is not blocked by a rewritten lockfile.
+- The backend reads the dist file list once at startup: a rebuild while it runs needs a restart. Missing `index.html` at startup is logged (`code-live: UI not built: …`) and the page answers 503 ([protocol](protocol.md#common-rules)).
 
 ## On-disk state
 
@@ -128,36 +140,40 @@ Duplicate triggers therefore never double-announce, and a turn missed during a d
 **Restart replay:**
 - SSE ids are `<boot>-<n>`.
 - An EventSource reconnecting natively after a backend restart presents the old process's id in `Last-Event-ID`, and the new process replays its whole ring. That ring includes announcements made by the startup reconcile before the page reconnected.
-- When the host answers the reconnect with 502/503 (restart backoff, a dead adopted child), the native source is CLOSED for good. `public/events.js` then re-creates it and carries the id in `?lastEventId=`, which `src/sse.js` reads when the header is absent.
+- When the host answers the reconnect with 502/503 (restart backoff, a dead adopted child), the native source is CLOSED for good. `frontend/src/lib/events.js` then re-creates it and carries the id in `?lastEventId=`, which `src/sse.js` reads when the header is absent.
 
 **Keep-alive:**
 - `frontend.keepAlive` in `conductor.plugin.json` gives the page its own resident frame in code-conductor, so the page can outlive many backend restarts.
 - The Gemini Live socket goes browser → Gemini, so a backend restart doesn't touch a running call.
-- What does depend on the backend reconnects: the event stream (`public/events.js`), Gemini resumes (`resumeDelayMs` spacing in `public/liveSession.js`), and tool calls (`CLIENT_ERROR` to Gemini while the backend is down). The announced set with its cursors, the key and the preferences are persisted (`state.json`, `secrets.json`, `preferences.json`).
+- What does depend on the backend reconnects: the event stream (`frontend/src/lib/events.js`), Gemini resumes (`resumeDelayMs` spacing in `frontend/src/lib/liveSession.js`), and tool calls (`CLIENT_ERROR` to Gemini while the backend is down). The announced set with its cursors, the key and the preferences are persisted (`state.json`, `secrets.json`, `preferences.json`).
 
 ## Security
 
 - **The key is exposed only in the `x-goog-api-key` header to Gemini.** `GET /api/settings` shows the last 4 characters. Validation errors don't echo input. Upstream error messages are scrubbed.
-- **The page renders model output only as DOM text.** Transcripts, conductor text, titles, tool args/results and errors are set via `textContent` or text nodes. `public/` contains no `innerHTML` / `outerHTML` / `insertAdjacentHTML` / `document.write` / `srcdoc` / `eval` / `new Function`.
-- **CSP:**
-  - Only same-origin scripts and styles may run. AudioWorklet modules count as scripts.
+- **The page renders model output only as text.** Transcripts, conductor text, titles, tool args/results, statuses and errors reach the DOM only as React text children (`Transcript.tsx`, `SettingsPane.tsx`), never as markup, an attribute or a link: a URL in content shows as text. `tests/frontend-source.test.mjs` scans `frontend/index.html`, `public/` and `src/` (tests excluded) for `innerHTML` / `outerHTML` / `insertAdjacentHTML` / `document.write` / `srcdoc` / `eval` / `new Function` / `dangerouslySetInnerHTML` / style writes, for `style=` / `href=` / `src=` in the plugin's own code, for root-relative URLs, hash navigation, `window.parent` and `code-conductor:` storage keys.
+- **CSP** (full policy and directive table: [protocol](protocol.md#common-rules)):
+  - Only same-origin scripts, styles and fonts load. AudioWorklet modules count as scripts. No `'unsafe-inline'`: no component used injects a `<style>`.
   - `connect-src` allows only same-origin and the Gemini Live origin.
   - It forbids framing by anything but the host.
-- **Why DOM text and CSP matter:** the plugin iframe is same-origin with code-conductor, whose API has no auth. They keep injected model output from acting on the host.
+- **Untrusted-input parsers stay linear** (the backend parses on the thread that answers `/api/health`). `tests/parser-timing.test.mjs` times every parser of request bodies, model and conductor output, host bodies and upstream errors, plus the page's announcement and Live message handling, at doubling sizes. Two constraints it pins: `dropParenthetical` (`src/answerMapping.js`) strips a trailing `(…)` group with `trimEnd`/`lastIndexOf`, not a regex with a leading `\s*`, which rescans a whitespace run from every start; `truncateBody` (`src/hostEvents.js`) drops the trailing newlines before the questions section with a loop, not an unanchored `/\n+$/`.
+- **Why text rendering and CSP matter:** the plugin iframe is same-origin with code-conductor, whose API has no auth. They keep injected model output from acting on the host.
 - **The worker guard is in `resolve`.** A tool that names a worker id is refused `NOT_A_CONDUCTOR` before any prompt or event read, and title matching considers only conductor rows.
 
 ## Tests
 
-Run with `npm test`, which is `node tests/run.mjs`: the `node:test` runner driven through its API, one file at a time.
+`npm test` runs three stages, each failing the run: `node tests/run.mjs` (the `node:test` runner driven through its API, one file at a time: backend, the plain `frontend/src/lib` modules, and the source/theme/dist scans), `tsc -p frontend`, then `vitest run --config frontend/vitest.config.ts` (happy-dom + Testing Library + user-event, `frontend/src/**/*.test.{ts,tsx}`).
+
+- **Dependencies:** a fresh clone gets them, and `frontend/dist`, from `npm install`. A worktree has no `node_modules`: `npm install` there (or symlink a checkout's whose versions match), then `npm run prepare`, because `tests/dist.test.mjs` reads the real build and fails with `run npm run prepare` without it.
 
 - **Fakes:**
   - `tests/fakes/fakeGemini.mjs` fakes the auth_tokens mint (with an injectable failure) and the Live socket. It checks single-use tokens, sends binary frames, and records client messages. `session(i)` / `next(pred)` / `closed` let tests await specific traffic, and `setConnectMode('reject')` makes resume attempts fail.
   - `tests/fakes/fakeHost.mjs` fakes the instance, ensure and events routes, plus `/ws` prompt/ack. Ack modes are `ok` / `refuse` / `silent`. It also has `broadcast`, `dropConnections`, `onPrompt` hooks and `finishTurn(id, text)`.
   - Its `POST /mcp` checks the JSON-RPC request shape, records `mcpCalls`, answers `get_recent_messages` from the instance's events (bonding like the host) and takes handlers for the other tools through `setMcp(name, fn)` with the `mcpOk` / `mcpSoft` / `mcpThrown` envelopes. `finishAsk(id, {kind, …})` ends a turn on a question or plan and sets the row's `awaitingUser*` fields (`frames:false` sends no `/ws` frame); its message reconstruction skips `parentToolUseId` events as the host does; `resetRing(id)` renumbers the events as a respawn does; `setRow` patches a row.
-- **Harness:** `tests/helpers.mjs`' `startApp()` builds a real server through `buildDeps` with a fresh temp `PROJECTS_ROOT` and short link timings. It also provides an SSE client and `SENTINEL_KEY`; tests use only that sentinel key.
-- **Frontend:** `tests/dom.mjs` installs happy-dom globals and imports the real `public/` modules.
+- **Harness:** `tests/helpers.mjs`' `startApp()` builds a real server through `buildDeps` with a fresh temp `PROJECTS_ROOT` and short link timings; `distDir` serves a fixture build (`fixtureDist()`: Vite's file shapes plus names that must never be served) and `fetchImpl` replaces the backend's outbound fetch. It also provides an SSE client, `nodeFetch` (a `node:http` fetch for page code under a test DOM, whose own fetch enforces CORS) and `SENTINEL_KEY`; tests use only that sentinel key.
+- **Frontend:** node tests import the `frontend/src/lib` modules directly and inject fakes (`frontend-controller`, `frontend-micCapture`, `frontend-transcriptStore`, …). Vitest renders the components; `frontend/src/App.integration.test.tsx` drives the real `<App>` over the real controller against the real backend, fake Gemini and fake host, with the network (`nodeFetch`), the `ws` WebSocket and audio/mic stubs injected through the controller's `env`.
+- **Build:** `tests/dist.test.mjs` checks the real `frontend/dist`: every file matches the served-name rule, the head order and relative URLs, no inline script or style, no source maps, no `url(` or absolute URL in the CSS, no root-relative `/api/` in the JS, and that the backend serves each referenced file with the CSP.
 - **Waits:** tests wait on observable outcomes (an SSE event, a received frame, a published marker), never on fixed sleeps.
-- **Style guard:** `tests/frontend-styles.test.mjs` reads `public/styles.css` as text and checks it has no `prefers-color-scheme` query, declares `color-scheme: dark` and the host's token names on `:root`, uses no `var(--…)` that `:root` doesn't declare, and pins code-conductor's disabled-button rendering: the `button:disabled` fade and the `button:not(.secondary):disabled` swap, copied from the host's generic `button:disabled` and primary-button `:disabled` rules. It also checks that `textarea` shares the field and focus styling and that a disabled select or textarea fades like a disabled button.
+- **Theme guard:** `tests/frontend-theme.test.mjs` checks the fallback is one `@layer base` block declaring `:root` and `.dark`, that it declares every token `index.css`'s `@theme inline` maps (colours in both modes), the imports and the class-based dark variant, that the plugin's own code has no literal colour, and that only `public/theme-init.js` touches `.dark` / `data-cc-theme`. It also keeps the Settings spacing rhythm: no margin or `space-*` utility in `SettingsPane.tsx`, every column spaced by its gap, and an empty status line hidden.
 - **Coverage guard:** `tests/nondisclosure.test.mjs` compares its probe list against `ROUTES`, so a new route fails until it is checked for key leaks.
 - **Real smoke tests:**
   - `tests/real-gemini.test.mjs` is skipped unless `RUN_REAL_GEMINI=1`, and reads the key from `GEMINI_API_KEY`. Models in its `CONNECT_ONLY` set skip the tool-call step (see the README's known limitations). Every model's token carries a non-default voice and custom instructions.

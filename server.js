@@ -1,5 +1,5 @@
 // code-live backend entry: builds the collaborators and serves the API and the
-// frontend. Feature logic lives in src/.
+// built frontend (frontend/dist). Feature logic lives in src/.
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,18 +14,19 @@ import { createHostMcp } from './src/hostMcp.js';
 import { createAnnouncer } from './src/announcer.js';
 import { createConductorService } from './src/conductor.js';
 import { createSseHub } from './src/sse.js';
-import { securityHeaders, sendJson, readJsonBody, loadStaticFiles, sendStatic } from './src/http.js';
+import { securityHeaders, sendJson, sendText, readJsonBody, loadStaticFiles, sendStatic } from './src/http.js';
 import { ROUTES } from './src/routes.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PUBLIC_DIR = path.join(__dirname, 'public');
+const DIST_DIR = path.join(__dirname, 'frontend', 'dist');
+const NOT_BUILT = 'UI not built — run npm install';
 
 const STATUS_BY_CODE = {
   INVALID_KEY: 400, INVALID_ARGS: 400, UNKNOWN_MODEL: 400, UNKNOWN_VOICE: 400, INVALID_PROMPT: 400, NO_API_KEY: 409,
   GEMINI_ERROR: 502, HOST_UNAVAILABLE: 502, HOST_HTTP_ERROR: 502, STORE_CORRUPT: 500,
 };
 
-// `opts` injects test seams: fetch, WebSocket, clock and link timings.
+// `opts` injects test seams: fetch, WebSocket, clock, link timings and the dist directory.
 export async function buildDeps(config, opts = {}) {
   const keyStore = createKeyStore({ dir: config.dataDir });
   const prefs = createPrefsStore({ dir: config.dataDir });
@@ -39,10 +40,12 @@ export async function buildDeps(config, opts = {}) {
   const hostMcp = createHostMcp({ baseUrl: config.conductorUrl, ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}) });
   const announcer = createAnnouncer({ api, link, state, publish, hostMcp });
   const service = createConductorService({ api, link, announcer, hostMcp });
-  const gemini = createGemini({ base: config.geminiBase, wsUrl: config.geminiWsUrl, keyStore, prefsStore: prefs, ...(opts.now ? { now: opts.now } : {}) });
+  const gemini = createGemini({ base: config.geminiBase, wsUrl: config.geminiWsUrl, keyStore, prefsStore: prefs, ...(opts.now ? { now: opts.now } : {}), ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}) });
   link.on('open', () => publish('host', { connected: true }));
   link.on('close', () => publish('host', { connected: false }));
-  return { config, headers, keyStore, prefs, state, sse, api, hostMcp, link, announcer, service, gemini, staticFiles: await loadStaticFiles(PUBLIC_DIR) };
+  const distDir = opts.distDir ?? DIST_DIR;
+  const { files: staticFiles, built: uiBuilt } = await loadStaticFiles(distDir);
+  return { config, headers, keyStore, prefs, state, sse, api, hostMcp, link, announcer, service, gemini, distDir, staticFiles, uiBuilt };
 }
 
 export function createServer(deps) {
@@ -67,8 +70,11 @@ export function createServer(deps) {
         if (out) sendJson(res, out.status ?? 200, out.body, headers);
         return;
       }
-      const entry = req.method === 'GET' || req.method === 'HEAD' ? deps.staticFiles.get(pathname) : undefined;
+      const read = req.method === 'GET' || req.method === 'HEAD';
+      const entry = read ? deps.staticFiles.get(pathname) : undefined;
       if (entry) return await sendStatic(res, entry, headers);
+      // No SPA fallback: anything else, the host's /pluginBridge.js and /pluginTheme.css included, is a 404.
+      if (read && !deps.uiBuilt && (pathname === '/' || pathname === '/index.html')) return sendText(res, 503, NOT_BUILT, headers);
       sendJson(res, 404, { error: 'not found', code: 'NOT_FOUND' }, headers);
     } catch (e) {
       const status = e.status ?? STATUS_BY_CODE[e.code];
@@ -101,6 +107,8 @@ function listenWithRetry(server, port, host, { tries = 40, delayMs = 100 } = {})
 export async function start(env = process.env) {
   const config = loadConfig(env);
   const deps = await buildDeps(config);
+  // The API and healthPath stay up without a built UI; the page answers 503 until it is built.
+  if (!deps.uiBuilt) console.error(`code-live: UI not built: ${path.join(deps.distDir, 'index.html')} is missing — run npm install`);
   const server = createServer(deps);
   deps.link.start();
   deps.announcer.reconcileLogged();

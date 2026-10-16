@@ -4,8 +4,16 @@ Interface contracts of the code-live backend, and the code-conductor and Gemini 
 
 ## Common rules
 
-- **Headers on every response**, including static files, 404s and SSE:
-  - `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self' <Gemini Live origin>; base-uri 'none'; form-action 'none'; frame-ancestors 'self'`. The Gemini Live origin is `wss://generativelanguage.googleapis.com` in production, derived from `CODE_LIVE_GEMINI_BASE`.
+- **Headers on every response**, including static files, 404s, the 503, 500s and SSE (`securityHeaders` in `src/http.js`):
+  - `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'self' <Gemini Live origin>; base-uri 'none'; form-action 'none'; frame-ancestors 'self'`. The Gemini Live origin is `wss://generativelanguage.googleapis.com` in production, derived from `CODE_LIVE_GEMINI_BASE`.
+
+    | directive | what it lets through |
+    |---|---|
+    | `script-src 'self'` | the bundle, `theme-init.js`, the host bridge `/pluginBridge.js`, and the `mic-worklet.js` AudioWorklet (`audioWorklet.addModule` is governed by `script-src`, not `worker-src`) |
+    | `style-src 'self'` | the built CSS and the host sheet `/pluginTheme.css`. No `'unsafe-inline'`: nothing on the page injects a `<style>` element or a style attribute |
+    | `font-src 'self'` | the host's Geist fonts (`/pluginTheme/fonts/…`, same origin) |
+    | `connect-src 'self' <Gemini Live origin>` | `api/*` fetches, the `api/events` SSE, and the page's direct Gemini Live WebSocket |
+    | (none for images or media) | the page loads no image (icons are inline SVG elements); playback is Web Audio, which needs no `media-src`; the microphone is a permission, not a CSP fetch |
   - `X-Content-Type-Options: nosniff`
   - `Referrer-Policy: no-referrer`
   - `Cache-Control: no-store`
@@ -15,7 +23,9 @@ Interface contracts of the code-live backend, and the code-conductor and Gemini 
   - a JSON object, else `400 INVALID_JSON`.
 - **Errors** are `{"error": "<message>", "code": "<CODE>"}`. Codes map to HTTP status as `STATUS_BY_CODE` in `server.js` defines. An unexpected error is `500 {"error":"internal error","code":"INTERNAL_ERROR"}`, logged server-side.
 - **Malformed request target:** a request target that does not parse as a path (e.g. `//`, which the host's proxy forwards for `/plugins/code-live//`) gets `400 {"error":"malformed request target","code":"BAD_REQUEST"}`, with the headers above.
-- **Static files:** every file in `public/` with a known extension is served at `/<name>`, and `/` serves `index.html`. Anything else is `404 {"error":"not found","code":"NOT_FOUND"}`.
+- **Static files:** the built UI in `frontend/dist`. A file at the dist root or in `assets/` (one level) whose name matches `SERVED_NAME` in `src/http.js` (letters, digits, `_` and `-`, then `.html`, `.js` or `.css`; so no `.map` file) is served at `/<name>` or `/assets/<name>`; `/` serves `index.html`. The list is read once at startup, so no request path touches the filesystem. Anything else is `404 {"error":"not found","code":"NOT_FOUND"}`: there is no SPA fallback, so the host URLs `/pluginBridge.js` and `/pluginTheme.css` 404 standalone.
+- **UI not built:** while `frontend/dist/index.html` is missing (at startup), `GET`/`HEAD` `/` and `/index.html` answer `503 text/plain; charset=utf-8` `UI not built — run npm install`; nothing else of the dist is served, and the API and `/api/health` stay up.
+- **The page's URLs:** every request to the backend is relative (`api/…`, assets), because the page lives under `/plugins/code-live/` in code-conductor. The only root-relative URLs are the host's `/pluginBridge.js` and `/pluginTheme.css`. The one absolute URL is the Gemini Live WebSocket the page opens directly (`wsUrl` from the token), whose origin is in `connect-src`.
 - The API key is never returned by any route.
 
 ## Routes
