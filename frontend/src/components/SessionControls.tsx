@@ -19,7 +19,7 @@ export function SessionControls({ controller }: { controller: AppController }) {
         <div className="flex items-center gap-2">
           <NativeSelect
             id="model"
-            className="w-full sm:w-auto"
+            className="w-full sm:w-auto sm:min-w-56"
             value={modelId}
             disabled={loading}
             onChange={(e) => controller.setModel(e.target.value)}
