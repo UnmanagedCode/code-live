@@ -12,7 +12,18 @@ function normalize(s) {
   return String(s).normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 }
 
-const dropParenthetical = (s) => s.replace(/\s*\([^()]*\)\s*$/, '');
+// A label without its trailing `(…)` group (one with no parentheses inside)
+// and the whitespace around it; any other label unchanged. Option labels are
+// conductor-written, so this stays linear: a regex with a leading `\s*` before
+// the group rescans a long whitespace run from every start. trimEnd strips the
+// same characters as `\s`.
+export function dropParenthetical(s) {
+  const t = s.trimEnd();
+  if (!t.endsWith(')')) return s;
+  const open = t.lastIndexOf('(', t.length - 2);
+  if (open < 0 || t.slice(open + 1, -1).includes(')')) return s;
+  return t.slice(0, open).trimEnd();
+}
 
 // The index of the option `choice` names, or -1 for none, or -2 for several.
 // First rung that matches anything decides.

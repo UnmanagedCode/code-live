@@ -5,7 +5,7 @@
 // re-creations and carries the last real event id in `?lastEventId=`.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createEventStream } from '../public/events.js';
+import { createEventStream } from '../frontend/src/lib/events.js';
 
 const CONNECTING = 0;
 const OPEN = 1;

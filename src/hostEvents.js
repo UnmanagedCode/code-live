@@ -35,7 +35,11 @@ export function truncateBody(text, max) {
   const section = text.slice(at);
   const room = max - section.length - 1;
   if (room >= 0) {
-    const head = text.slice(0, at).replace(/\n+$/, '');
+    // The prose before the section, without its trailing newlines. A loop, not
+    // /\n+$/: unanchored, that rescans a long newline run from every start.
+    let end = at;
+    while (end > 0 && text.charCodeAt(end - 1) === 10) end--;
+    const head = text.slice(0, end);
     return { text: (room >= 2 && head ? `${truncate(head, room)}\n` : '') + section, cut: false, dropped: false };
   }
   const lines = section.split('\n');

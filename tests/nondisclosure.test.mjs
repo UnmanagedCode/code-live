@@ -5,7 +5,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { readdirSync } from 'node:fs';
 import { ROUTES } from '../src/routes.js';
 import { CUSTOM_PROMPT_MAX } from '../src/prefsStore.js';
 import { startFakeGemini } from './fakes/fakeGemini.mjs';
@@ -80,7 +79,7 @@ test('the stored key never appears in any response', async (t) => {
 
   const responses = [];
   for (const probe of Object.values(probes)) responses.push(...await Promise.all(await probe()));
-  for (const f of readdirSync(new URL('../public/', import.meta.url))) responses.push(await req(u(`/${f}`)));
+  for (const p of app.deps.staticFiles.keys()) responses.push(await req(u(p)));
   responses.push(await req(u('/missing')), await req(u('/')));
 
   assert.ok(responses.length > 30);

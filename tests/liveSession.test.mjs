@@ -6,8 +6,8 @@
 // same handle, and is cleared by every state other than live/reconnecting.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createLiveSession } from '../public/liveSession.js';
-import { createApi } from '../public/api.js';
+import { createLiveSession } from '../frontend/src/lib/liveSession.js';
+import { createApi } from '../frontend/src/lib/api.js';
 import { startFakeGemini } from './fakes/fakeGemini.mjs';
 import { startFakeHost } from './fakes/fakeHost.mjs';
 import { startApp, waitFor, SENTINEL_KEY, CONDUCTOR_A, WORKER } from './helpers.mjs';

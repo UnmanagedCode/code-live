@@ -25,15 +25,16 @@ export async function waitFor(fn, { timeoutMs = 2000, what = 'condition' } = {})
 }
 
 // Starts the app. `startLink` connects to the fake host's /ws and waits for
-// the first open; `projectsRoot` reuses an existing root (restart tests).
-export async function startApp({ gemini, host, projectsRoot, now, link = {}, startLink = true, reconcileOnStart = true } = {}) {
+// the first open; `projectsRoot` reuses an existing root (restart tests);
+// `distDir` serves another UI build than frontend/dist.
+export async function startApp({ gemini, host, projectsRoot, now, distDir, link = {}, startLink = true, reconcileOnStart = true } = {}) {
   const root = projectsRoot ?? await tempDir();
   const config = loadConfig({
     PROJECTS_ROOT: root,
     CONDUCTOR_URL: host ? host.url : 'http://127.0.0.1:9',
     CODE_LIVE_GEMINI_BASE: gemini ? gemini.base : 'http://127.0.0.1:9',
   });
-  const deps = await buildDeps(config, { now, link: { baseDelayMs: 5, maxDelayMs: 40, ackTimeoutMs: 300, ...link } });
+  const deps = await buildDeps(config, { now, distDir, link: { baseDelayMs: 5, maxDelayMs: 40, ackTimeoutMs: 300, ...link } });
   const server = createServer(deps);
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const url = `http://127.0.0.1:${server.address().port}`;
@@ -68,6 +69,55 @@ export async function req(url, { method = 'GET', body, headers = {}, raw } = {})
   let json;
   try { json = JSON.parse(text); } catch { json = undefined; }
   return { status: res.status, headers: res.headers, text, json };
+}
+
+// A minimal fetch over node:http (method, headers, string body, signal) for page
+// code running under a test DOM, whose own fetch and AbortSignal are not Node's.
+// An abort rejects with the signal's reason, like a real fetch.
+export function nodeFetch(url, { method = 'GET', headers = {}, body, signal } = {}) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(signal.reason); return; }
+    const done = () => signal?.removeEventListener('abort', onAbort);
+    const r = http.request(new URL(String(url)), { method, headers }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('error', (e) => { done(); reject(e); });
+      res.on('end', () => {
+        done();
+        const text = Buffer.concat(chunks).toString('utf8');
+        resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, text: async () => text, json: async () => JSON.parse(text) });
+      });
+    });
+    function onAbort() { r.destroy(); reject(signal.reason); }
+    signal?.addEventListener('abort', onAbort, { once: true });
+    r.on('error', (e) => { done(); if (!signal?.aborted) reject(e); });
+    if (body !== undefined) r.write(body);
+    r.end();
+  });
+}
+
+// A fake UI build: the shapes Vite writes (index.html, hashed assets/, files
+// copied from frontend/public/) plus names the server must never serve.
+export async function fixtureDist() {
+  const dir = await tempDir();
+  const files = {
+    'index.html': '<!doctype html><title>fixture</title>',
+    'theme-init.js': '/* theme */',
+    'mic-worklet.js': '/* worklet */',
+    'assets/index-Ab_1-z.js': '/* bundle */',
+    'assets/index-Cd2.css': '/* styles */',
+    'assets/index-Ab_1-z.js.map': '{}',
+    'assets/nested/deep.js': '/* nested */',
+    'notes.txt': 'text',
+    'a.b.js': '/* two dots */',
+    '.hidden.js': '/* dotfile */',
+    'sub/x.js': '/* subdir */',
+  };
+  for (const [rel, text] of Object.entries(files)) {
+    await fs.mkdir(path.dirname(path.join(dir, rel)), { recursive: true });
+    await fs.writeFile(path.join(dir, rel), text);
+  }
+  return dir;
 }
 
 export const callTool = (app, name, args) => req(`${app.url}/api/tools/call`, { method: 'POST', body: { name, args } }).then((r) => r.json);

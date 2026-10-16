@@ -1,23 +1,25 @@
 // Request/response helpers: security headers on every response, JSON bodies,
-// and static files from public/ served from a fixed allowlist.
+// and the built UI (frontend/dist) served from a fixed allowlist.
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 const MAX_BODY = 64 * 1024;
 
 const MIME = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.ico': 'image/x-icon',
+  html: 'text/html; charset=utf-8',
+  js: 'text/javascript; charset=utf-8',
+  css: 'text/css; charset=utf-8',
 };
+// A servable file name: Vite's hashed `index-<base64url>.js` and the files
+// copied from frontend/public/. One dot only, so no `.map` and no decoy names.
+export const SERVED_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]*\.(html|js|css)$/;
+// The dist directories that are served: the root and Vite's assets/.
+const SERVED_DIRS = ['', 'assets'];
 
 export function securityHeaders(geminiWsUrl) {
   const geminiOrigin = new URL(geminiWsUrl).origin;
   return {
-    'content-security-policy': `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self' ${geminiOrigin}; base-uri 'none'; form-action 'none'; frame-ancestors 'self'`,
+    'content-security-policy': `default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'self' ${geminiOrigin}; base-uri 'none'; form-action 'none'; frame-ancestors 'self'`,
     'x-content-type-options': 'nosniff',
     'referrer-policy': 'no-referrer',
     'cache-control': 'no-store',
@@ -38,6 +40,11 @@ export function sendJson(res, status, body, headers) {
   res.end(data);
 }
 
+export function sendText(res, status, text, headers) {
+  res.writeHead(status, { ...headers, 'content-type': 'text/plain; charset=utf-8', 'content-length': Buffer.byteLength(text) });
+  res.end(text);
+}
+
 export async function readJsonBody(req) {
   const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
   if (type !== 'application/json') throw new HttpError(415, 'UNSUPPORTED_MEDIA_TYPE', 'request body must be application/json');
@@ -55,17 +62,28 @@ export async function readJsonBody(req) {
 }
 
 // Maps each servable URL path to a file in `dir`, built once from readdir so
-// no request path is ever joined onto the filesystem.
+// no request path is ever joined onto the filesystem. `built` is false when
+// `dir` has no index.html (the UI was never built); nothing is served then.
 export async function loadStaticFiles(dir) {
   const files = new Map();
-  for (const name of await fs.readdir(dir)) {
-    const ext = path.extname(name);
-    if (!MIME[ext]) continue;
-    files.set('/' + name, { file: path.join(dir, name), type: MIME[ext] });
+  for (const sub of SERVED_DIRS) {
+    let entries;
+    try {
+      entries = await fs.readdir(path.join(dir, sub), { withFileTypes: true });
+    } catch (e) {
+      if (e.code === 'ENOENT' || e.code === 'ENOTDIR') continue;
+      throw e;
+    }
+    for (const entry of entries) {
+      const m = SERVED_NAME.exec(entry.name);
+      if (!m || !entry.isFile()) continue;
+      files.set(`/${sub ? `${sub}/` : ''}${entry.name}`, { file: path.join(dir, sub, entry.name), type: MIME[m[1]] });
+    }
   }
   const index = files.get('/index.html');
-  if (index) files.set('/', index);
-  return files;
+  if (!index) return { files: new Map(), built: false };
+  files.set('/', index);
+  return { files, built: true };
 }
 
 export async function sendStatic(res, entry, headers) {
