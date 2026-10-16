@@ -16,7 +16,12 @@ Details: [docs/features.md](docs/features.md).
 
 ## Install and enable
 
-code-live must be a registered code-conductor project, so the host's plugin discovery finds it. No Library install is needed. The backend has no runtime dependencies, but the page is built: run `npm install` in the checkout (it installs the devDependencies and builds `frontend/dist` through `prepare`). A Library install runs it for you; a checkout that isn't Library-managed needs `npm install` again after every pull, or the page answers `503 UI not built — run npm install`. With `$CC` as the code-conductor URL:
+code-live must be a registered code-conductor project, so the host's plugin discovery finds it. Installing it from the Library is optional; any registered checkout works. The backend has no runtime dependencies, but the page is built, by `npm install` in the checkout (it installs the devDependencies and builds `frontend/dist` through `prepare`):
+
+- **Installed from the Library:** the Library's install and update hooks run `npm install` for you.
+- **Any other checkout:** run `npm install` yourself, and again after every pull. Until it has run, the page answers `503 UI not built — run npm install`.
+
+Then enable it. With `$CC` as the code-conductor URL:
 
 ```sh
 curl -X POST $CC/api/plugins/rescan

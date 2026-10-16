@@ -28,7 +28,7 @@ export function SessionControls({ controller }: { controller: AppController }) {
               <option key={m.id} value={m.id}>{m.hint ? `${m.label} (${m.hint})` : m.label}</option>
             ))}
           </NativeSelect>
-          {loading && !modelsError && <span className="text-sm whitespace-nowrap text-muted-foreground">Loading models…</span>}
+          {loading && <span className="text-sm whitespace-nowrap text-muted-foreground">{modelsError ? 'Models unavailable' : 'Loading models…'}</span>}
         </div>
       </div>
       <div className="flex gap-2">

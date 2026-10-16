@@ -2,7 +2,8 @@
 // aria-busy and data-state for every session state, the Pause button's
 // enablement, label and aria-pressed, that clicks reach the controller, and the
 // model select: each model with its hint, disabled with a loading hint (and no
-// placeholder option) until the models arrive.
+// placeholder option) until the models arrive, and with an unavailable hint
+// instead when they failed to load.
 import { describe, expect, it } from 'vitest';
 import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -73,6 +74,16 @@ describe('SessionControls', () => {
     expect(screen.getByText('Loading models…')).toBeTruthy();
     act(() => store.set({ models: MODELS, modelId: MODELS[0].id }));
     expect(select.disabled).toBe(false);
+    expect(screen.queryByText('Loading models…')).toBeNull();
+  });
+
+  it('when the models failed to load, the empty select says they are unavailable instead of loading', () => {
+    const { controller } = fakeController({ models: [], modelId: '', modelsError: 'HTTP 503' });
+    render(<SessionControls controller={controller} />);
+    const select = screen.getByRole('combobox', { name: 'Model' }) as HTMLSelectElement;
+    expect(select.disabled).toBe(true);
+    expect(select.options).toHaveLength(0);
+    expect(screen.getByText('Models unavailable')).toBeTruthy();
     expect(screen.queryByText('Loading models…')).toBeNull();
   });
 });
