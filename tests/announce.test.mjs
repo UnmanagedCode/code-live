@@ -297,6 +297,31 @@ test("the host's planTruncated flag on a short body is announced as planTruncate
   assert.ok(ev.data.text.length < 4000);
 });
 
+// Invariant: a plan over MAX_TEXT rendered from its own plan_request event (the /mcp read failed) is flagged
+// planTruncated and its text stays within MAX_TEXT.
+test('a cut plan rendered from its event, with the /mcp read failing, is announced with planTruncated', async (t) => {
+  const { host, sse } = await setup(t);
+  t.mock.method(console, 'error', () => {});
+  host.setMcp('get_recent_messages', () => mcpThrown('unavailable'));
+  host.finishAsk('cond-a', { kind: 'plan', plan: 'line\n'.repeat(2000), planPath: '/plans/big.md', prose: 'Big plan.' });
+  const ev = await sse.next('announce');
+  assert.deepEqual(ev.data.ask, { kind: 'plan', planPath: '/plans/big.md' });
+  assert.equal(ev.data.planTruncated, true);
+  assert.ok(ev.data.text.length <= 4000);
+  assert.ok(ev.data.text.includes('--- plan · saved to /plans/big.md ---'), 'the plan came from the event');
+});
+
+// Invariant: the same holds for a pending plan announced from its own event behind a later turn.
+test('a cut pending plan behind a later turn is announced with planTruncated', async (t) => {
+  const { host, sse } = await setup(t);
+  askThenLaterTurn(host, { kind: 'plan', plan: 'line\n'.repeat(2000), planPath: '/plans/big.md', prose: 'Plan below.' });
+  host.broadcast({ t: 'instances', instances: host.state.instances });
+  const ev = await sse.next('announce');
+  assert.equal(ev.data.ask.kind, 'plan');
+  assert.equal(ev.data.planTruncated, true);
+  assert.ok(ev.data.text.length <= 4000);
+});
+
 // Invariant: a short plan, and a long reply with no plan, are not flagged.
 test('no planTruncated for a short plan or a long plan-free reply', async (t) => {
   const { host, sse } = await setup(t);

@@ -517,12 +517,12 @@ test('read_conductor_plan returns a plan over MAX_TEXT whole, part by part', asy
   assert.deepEqual(app.deps.state.get().watched, {}, 'reading never starts announcing');
 });
 
-// Invariant: read_conductor_plan returns the newest top-level plan, auto-approved or not, never an older one;
-// awaitingApproval reports pending-ness separately.
+// Invariant: read_conductor_plan reads a plan_request carrying autoApproved:true whole, newer than an earlier
+// pending one, with awaitingApproval false. (latestAskEvent skips such an event and would return OLD plan.)
 test('read_conductor_plan reads an auto-approved plan newer than an earlier pending one', async (t) => {
   const { host, app } = await setup(t);
   host.finishAsk('cond-a', { kind: 'plan', plan: 'OLD plan', frames: false });
-  host.finishAsk('cond-a', { kind: 'plan', plan: BIG_PLAN, frames: false, row: { awaitingUser: null, awaitingUserSource: null } });
+  host.finishAsk('cond-a', { kind: 'plan', plan: BIG_PLAN, autoApproved: true, frames: false, row: { awaitingUser: null, awaitingUserSource: null } });
   const results = await readAllParts(app);
   assert.equal(results.map((r) => r.text).join(''), BIG_PLAN);
   assert.equal(results[0].awaitingApproval, false);

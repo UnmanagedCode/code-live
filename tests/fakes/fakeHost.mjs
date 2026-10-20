@@ -192,12 +192,12 @@ export async function startFakeHost({ instances = [], events = {}, port = 0 } = 
     // (`plan`, `planPath`), sets the row's awaiting-user fields as the host
     // does, and notifies. A suppressed turn (notify:false) sends only the
     // `instances` frame, as the host does for a conductor waiting on a worker.
-    // `frames:false` sends no /ws frame at all. `row` overrides the awaiting-user fields (e.g. null/'text' for an
+    // `frames:false` sends no /ws frame at all. `autoApproved` marks the plan_request event as the host auto-approved it. `row` overrides the awaiting-user fields (e.g. null/'text' for an
     // auto-approved plan or a prose-only ask).
-    finishAsk(id, { kind, questions, plan = null, planPath = null, prose = 'Before I continue:', notify = true, frames = true, row: rowPatch = { awaitingUser: kind, awaitingUserSource: 'tool' } }) {
+    finishAsk(id, { kind, questions, plan = null, planPath = null, autoApproved = false, prose = 'Before I continue:', notify = true, frames = true, row: rowPatch = { awaitingUser: kind, awaitingUserSource: 'tool' } }) {
       addEvent(id, { kind: 'assistant_message', msgId: `m${(seqs[id] ?? 0) + 1}`, message: { content: [{ type: 'text', text: prose }] } });
       if (kind === 'question') addEvent(id, { kind: 'user_question', toolUseId: `tu${seqs[id]}`, questions });
-      else addEvent(id, { kind: 'plan_request', toolUseId: `tu${seqs[id]}`, plan, planPath });
+      else addEvent(id, { kind: 'plan_request', toolUseId: `tu${seqs[id]}`, plan, planPath, ...(autoApproved ? { autoApproved: true } : {}) });
       const end = addEvent(id, { kind: 'turn_end', isError: false, stopReason: 'end_turn' });
       const row = state.instances.find((i) => i.id === id);
       Object.assign(row, rowPatch);
