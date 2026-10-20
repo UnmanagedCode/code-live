@@ -3,6 +3,8 @@
 
 export const CONDUCTOR_PROJECT = '.conduct';
 export const MAX_TEXT = 4000;
+// The most text one paged read of a message carries.
+export const PART_CHARS = 12000;
 
 export function isConductor(inst) {
   return !!inst && inst.project === CONDUCTOR_PROJECT;
@@ -59,6 +61,27 @@ export function truncateBody(text, max) {
   return { text: kept.join('\n'), cut: true, dropped: true };
 }
 
+// Splits a message body into parts of at most `size` chars whose concatenation is
+// exactly `text`. A part breaks after a newline when one lies in the back half
+// of its window, so parts read back as the body's own lines; otherwise it is
+// cut at `size`. The backward newline scan stops at the middle of its window
+// (a part is at least half of `size`, so the work per part is bounded by the
+// part's own length): linear in the text.
+export function textParts(text, size = PART_CHARS) {
+  const parts = [];
+  let start = 0;
+  while (start < text.length) {
+    if (start + size >= text.length) { parts.push(text.slice(start)); break; }
+    let end = start + size;
+    for (let i = start + size - 1; i >= start + size / 2; i--) {
+      if (text.charCodeAt(i) === 10) { end = i + 1; break; }
+    }
+    parts.push(text.slice(start, end));
+    start = end;
+  }
+  return parts;
+}
+
 // Host payload fields are not trusted to be well formed: anything else than a
 // string renders as empty rather than throwing.
 const str = (v) => (typeof v === 'string' ? v : '');
@@ -111,17 +134,16 @@ export function summarize(inst) {
 }
 
 // The text blocks of a top-level assistant_message event (sub-agent messages
-// carry parentToolUseId and are not the conductor's) joined with newlines, or ''
-// for anything else (including tool-use-only messages).
+// carry parentToolUseId and are not the conductor's) joined with '', as the host
+// joins them, or '' for anything else (including tool-use-only messages).
 export function assistantText(ev) {
   if (!ev || ev.kind !== 'assistant_message' || ev.parentToolUseId) return '';
   const content = ev.message?.content;
   if (!Array.isArray(content)) return '';
-  const text = content
+  return content
     .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
     .map((b) => b.text)
-    .join('\n');
-  return text.trim() === '' ? '' : text;
+    .join('');
 }
 
 export function hasSeq(ev) {

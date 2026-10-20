@@ -1,6 +1,8 @@
-// Fake code-conductor host: the REST routes code-live calls, the /ws hub
+// Fake code-conductor host: the REST routes code-live calls (the events route
+// pages like the host's: trailing, `before` and `after` windows), the /ws hub
 // (prompt → ack, turn_notification and instances broadcasts) and the bare
-// `POST /mcp` tools/call endpoint, shaped as cc's MCP server replies.
+// `POST /mcp` tools/call endpoint for the write tools, shaped as cc's MCP
+// server replies.
 import http from 'node:http';
 import { WebSocketServer } from 'ws';
 
@@ -10,58 +12,45 @@ export const mcpOk = asText;
 export const mcpSoft = (code, reason, extra = {}) => asText({ ok: false, code, reason, ...extra });
 export const mcpThrown = (prose, extra = {}) => ({ content: [{ type: 'text', text: prose }, { type: 'text', text: JSON.stringify({ error: prose, ...extra }) }], isError: true });
 
-function proseOf(ev) {
-  const blocks = Array.isArray(ev.message?.content) ? ev.message.content : [];
-  const text = blocks.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('\n');
-  return text.trim() === '' ? '' : text;
-}
+// The host's page cap, and the page it serves when no limit is given.
+const LIMIT_MAX = 500;
+const LIMIT_DEFAULT = 200;
 
-function renderQuestions(questions) {
-  const lines = ['--- questions ---'];
-  questions.forEach((q, i) => {
-    lines.push(`${i + 1}. ${q.question} (multiSelect: ${!!q.multiSelect})${q.header ? ` · header: ${q.header}` : ''}`);
-    for (const o of q.options ?? []) lines.push(`   - ${o.label}${o.description ? `: ${o.description}` : ''}`);
-  });
-  return lines.join('\n');
-}
+// Events as the host serves them from disk (below the ring): replayed deltas,
+// no assistant_message and no message_start.
+const isArchiveKind = (ev) => ev.kind !== 'assistant_message' && ev.kind !== 'message_start';
 
-// The text-bearing assistant messages of an event ring, like cc's
-// reconstructMessages: a user_question / plan_request attaches to the
-// assistant message before it, and `turn` counts the turn_ends before it.
-// Sub-agent events (parentToolUseId) are skipped, as the host does.
-function reconstruct(events) {
-  const messages = [];
-  let turn = 0;
-  let last = null;
-  for (const ev of events) {
-    if (ev.parentToolUseId) continue;
-    if (ev.kind === 'assistant_message') {
-      last = { msgId: ev.msgId ?? `m${ev._seq}`, text: proseOf(ev), turn };
-      messages.push(last);
-    } else if (ev.kind === 'user_question' && last) last.questions = ev.questions;
-    else if (ev.kind === 'plan_request' && last) { last.plan = ev.plan ?? null; last.planPath = ev.planPath ?? null; last.hasPlan = true; }
-    else if (ev.kind === 'turn_end') turn++;
+// One page of an event list like the host's pageInstanceEvents: no cursor is the
+// trailing page; `before` the events right before that seq; `after` the first
+// events after it (exclusive). `nextBefore` is the first served seq. Exact
+// windows: the host's snap to a quiescent index is not modelled.
+function pageEvents(all, { before, after, limit, archiveBelow }) {
+  const max = Math.min(Math.max(limit || LIMIT_DEFAULT, 1), LIMIT_MAX);
+  const lastSeq = all.at(-1)?._seq ?? 0;
+  let served;
+  let hasMore;
+  if (before == null && after == null) before = lastSeq + 1;
+  if (before != null) {
+    const older = all.filter((ev) => ev._seq < before);
+    served = older.slice(-max);
+    hasMore = older.length > served.length;
+  } else {
+    const newer = all.filter((ev) => ev._seq > after);
+    served = newer.slice(0, max);
+    hasMore = newer.length > served.length;
   }
-  return messages.filter((m) => m.text || m.questions || m.hasPlan);
-}
-
-function renderBody(m) {
-  const parts = [];
-  if (m.text) parts.push(m.text);
-  if (m.hasPlan) parts.push(`${m.planPath ? `--- plan · saved to ${m.planPath} ---` : '--- plan ---'}${m.plan ? `\n${m.plan}` : ''}`);
-  if (m.questions) parts.push(renderQuestions(m.questions));
-  return parts.join('\n');
-}
-
-// cc's default get_recent_messages selection: the last message, bonded back to
-// its own turn's plan/questions message; an explicit count is literal.
-function selectMessages(all, count) {
-  if (count !== undefined) return all.slice(-count);
-  const last = all.at(-1);
-  if (!last) return [];
-  if (last.questions || last.hasPlan) return [last];
-  const from = all.findIndex((m) => m.turn === last.turn && (m.questions || m.hasPlan));
-  return from >= 0 ? all.slice(from) : [last];
+  if (archiveBelow != null) {
+    const out = [];
+    for (const ev of served) {
+      if (ev._seq < archiveBelow && !isArchiveKind(ev)) continue;
+      // The seam between disk and ring: a seq-less gap marker, as the host serves.
+      if (ev._seq >= archiveBelow && out.length && out.at(-1)._seq < archiveBelow) out.push({ kind: 'history_gap' });
+      out.push(ev);
+    }
+    served = out;
+  }
+  const first = served.find((ev) => typeof ev._seq === 'number');
+  return { events: served, hasMore, nextBefore: first ? first._seq : null, trimmedBefore: 0, lastSeq };
 }
 
 export async function startFakeHost({ instances = [], events = {}, port = 0 } = {}) {
@@ -73,27 +62,10 @@ export async function startFakeHost({ instances = [], events = {}, port = 0 } = 
   const promptHooks = [];
   const mcpCalls = [];
   const mcpHandlers = {};
+  const archiveBelow = new Map();
+  let toolUses = 0;
   let ackMode = 'ok';
   let created = 0;
-
-  // The default get_recent_messages: derived from the instance's event ring.
-  function recentMessages({ sessionId, count }) {
-    const inst = state.instances.find((i) => i.sessionId === sessionId);
-    if (!inst) return mcpSoft('SESSION_NOT_LIVE', `no live session ${sessionId}`);
-    const msgs = selectMessages(reconstruct(state.events[inst.id] ?? []), count);
-    const meta = {
-      sessionId,
-      messages: msgs.map((m, index) => ({
-        index, msgId: m.msgId, hasToolUse: false, textChars: m.text.length, textTruncated: false,
-        ...(m.hasPlan ? { hasPlan: true } : {}),
-        ...(m.planPath ? { planPath: m.planPath } : {}),
-        ...(m.questions ? { questionCount: m.questions.length } : {}),
-      })),
-      source: 'ring', omittedToolOnly: 0, retained: { firstSeq: 0, lastSeq: seqs[inst.id] ?? -1, trimmed: false },
-    };
-    const bodies = msgs.map((m, i) => (msgs.length > 1 ? `--- message ${i + 1}/${msgs.length} · ${m.msgId} · ${m.text.length} chars ---\n` : '') + renderBody(m));
-    return { content: [{ type: 'text', text: JSON.stringify(meta) }, ...bodies.map((text) => ({ type: 'text', text }))] };
-  }
 
   function addEvent(id, ev) {
     const list = (state.events[id] ??= []);
@@ -103,6 +75,19 @@ export async function startFakeHost({ instances = [], events = {}, port = 0 } = 
     return withSeq;
   }
   for (const [id, list] of Object.entries(events)) for (const ev of list) addEvent(id, ev);
+
+  // Appends one streamed text message (none for an empty `text`) and returns its
+  // msgId.
+  function streamMessage(id, text) {
+    const msgId = `m${(seqs[id] ?? 0) + 1}`;
+    addEvent(id, { kind: 'message_start', msgId });
+    if (text) {
+      addEvent(id, { kind: 'text_delta', msgId, blockIdx: 0, text });
+      addEvent(id, { kind: 'text_end', msgId, blockIdx: 0 });
+      addEvent(id, { kind: 'assistant_message', msgId, blockIdx: 0, message: { content: [{ type: 'text', text }] } });
+    }
+    return msgId;
+  }
 
   function json(res, status, body) {
     res.writeHead(status, { 'content-type': 'application/json' });
@@ -122,7 +107,7 @@ export async function startFakeHost({ instances = [], events = {}, port = 0 } = 
       }
       const { name, arguments: args } = body.params;
       mcpCalls.push({ name, arguments: args, url: req.url, id: body.id });
-      const handler = mcpHandlers[name] ?? (name === 'get_recent_messages' ? recentMessages : null);
+      const handler = mcpHandlers[name] ?? null;
       if (!handler) return json(res, 200, { jsonrpc: '2.0', id: body.id, result: mcpThrown(`unknown tool: ${name}`) });
       const result = await handler(args ?? {});
       return json(res, 200, { jsonrpc: '2.0', id: body.id, result });
@@ -138,10 +123,9 @@ export async function startFakeHost({ instances = [], events = {}, port = 0 } = 
     if (req.method === 'GET' && m) {
       const id = decodeURIComponent(m[1]);
       if (!state.instances.some((i) => i.id === id) || state.eventsGone.has(id)) return json(res, 404, { error: 'unknown instance' });
-      const limit = Number(url.searchParams.get('limit')) || 500;
-      const all = state.events[id] ?? [];
-      const evs = all.slice(-limit);
-      return json(res, 200, { id, events: evs, hasMore: all.length > evs.length, nextBefore: null, trimmedBefore: 0, lastSeq: seqs[id] ?? 0 });
+      const num = (key) => (url.searchParams.has(key) ? Number(url.searchParams.get(key)) : null);
+      const page = pageEvents(state.events[id] ?? [], { before: num('before'), after: num('after'), limit: num('limit'), archiveBelow: archiveBelow.get(id) });
+      return json(res, 200, { id, ...page });
     }
     json(res, 404, { error: 'not found' });
   });
@@ -179,9 +163,12 @@ export async function startFakeHost({ instances = [], events = {}, port = 0 } = 
     broadcast(frame) { for (const c of wss.clients) c.send(JSON.stringify(frame)); },
     clientCount: () => wss.clients.size,
     dropConnections() { for (const c of wss.clients) c.terminate(); },
-    // Appends a finished turn (reply + turn_end) and returns the turn_end.
+    // Appends a finished turn (reply + turn_end) and returns the turn_end. The
+    // reply is a message as the live host streams it: message_start, one
+    // text_delta and text_end, and the reconciled assistant_message envelope,
+    // all under one msgId (`m<seq of its first event>`).
     finishTurn(id, text, { notify = true } = {}) {
-      addEvent(id, { kind: 'assistant_message', msgId: `m${(seqs[id] ?? 0) + 1}`, message: { content: [{ type: 'text', text }] } });
+      streamMessage(id, text);
       const end = addEvent(id, { kind: 'turn_end', isError: false, stopReason: 'end_turn' });
       if (notify) this.broadcast({ t: 'turn_notification', id, project: '.conduct', isError: false, stopReason: 'end_turn', cost: 0.01 });
       return end;
@@ -192,12 +179,18 @@ export async function startFakeHost({ instances = [], events = {}, port = 0 } = 
     // (`plan`, `planPath`), sets the row's awaiting-user fields as the host
     // does, and notifies. A suppressed turn (notify:false) sends only the
     // `instances` frame, as the host does for a conductor waiting on a worker.
-    // `frames:false` sends no /ws frame at all. `row` overrides the awaiting-user fields (e.g. null/'text' for an
+    // `frames:false` sends no /ws frame at all. `autoApproved` marks the plan_request event as the host auto-approved it. `row` overrides the awaiting-user fields (e.g. null/'text' for an
     // auto-approved plan or a prose-only ask).
-    finishAsk(id, { kind, questions, plan = null, planPath = null, prose = 'Before I continue:', notify = true, frames = true, row: rowPatch = { awaitingUser: kind, awaitingUserSource: 'tool' } }) {
-      addEvent(id, { kind: 'assistant_message', msgId: `m${(seqs[id] ?? 0) + 1}`, message: { content: [{ type: 'text', text: prose }] } });
-      if (kind === 'question') addEvent(id, { kind: 'user_question', toolUseId: `tu${seqs[id]}`, questions });
-      else addEvent(id, { kind: 'plan_request', toolUseId: `tu${seqs[id]}`, plan, planPath });
+    finishAsk(id, { kind, questions, plan = null, planPath = null, autoApproved = false, inputPlan = true, prose = 'Before I continue:', notify = true, frames = true, row: rowPatch = { awaitingUser: kind, awaitingUserSource: 'tool' } }) {
+      const msgId = streamMessage(id, prose);
+      const toolUseId = `tu${++toolUses}`;
+      const isPlan = kind !== 'question';
+      const input = isPlan ? (inputPlan && plan ? { plan } : {}) : { questions };
+      const name = isPlan ? 'ExitPlanMode' : 'AskUserQuestion';
+      addEvent(id, { kind: 'tool_use', msgId, blockIdx: 1, toolUseId, name, input });
+      addEvent(id, { kind: 'assistant_message', msgId, blockIdx: 1, message: { content: [{ type: 'tool_use', id: toolUseId, name, input }] } });
+      if (isPlan) addEvent(id, { kind: 'plan_request', toolUseId, plan, planPath, ...(autoApproved ? { autoApproved: true } : {}) });
+      else addEvent(id, { kind: 'user_question', toolUseId, questions });
       const end = addEvent(id, { kind: 'turn_end', isError: false, stopReason: 'end_turn' });
       const row = state.instances.find((i) => i.id === id);
       Object.assign(row, rowPatch);
@@ -208,6 +201,10 @@ export async function startFakeHost({ instances = [], events = {}, port = 0 } = 
       }
       return end;
     },
+    // Serves the events of `id` below `seq` as the host serves them from disk:
+    // replayed deltas only (no assistant_message, no message_start), with a
+    // history_gap marker at the seam.
+    archiveBelow(id, seq) { archiveBelow.set(id, seq); },
     // Replays an instance's history into a fresh ring, as rewind, prune and
     // respawn do: `drop` filters events out, the rest are renumbered from 1.
     resetRing(id, { drop = () => false } = {}) {

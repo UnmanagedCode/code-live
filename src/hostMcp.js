@@ -1,15 +1,15 @@
-// The one adapter for code-conductor's MCP endpoint. code-live calls the bare
-// `POST <host>/mcp` (stateless JSON-RPC `tools/call`, no initialize, no session
-// header), which is outside the sanctioned plugin API: a host change can break
-// it without a manifest-level signal. Every such call lives here. Moving to a
-// sanctioned host-tool path means editing MCP_PATH, `callTool` and the plugin
-// manifest, and nothing else.
+// The one adapter for code-conductor's MCP endpoint, for the write tools only
+// (answering a question, approving or rejecting a plan); every read goes over
+// the REST events route. code-live calls the bare `POST <host>/mcp` (stateless
+// JSON-RPC `tools/call`, no initialize, no session header), which is outside the
+// sanctioned plugin API: a host change can break it without a manifest-level
+// signal. Every such call lives here. Moving to a sanctioned host-tool path means
+// editing MCP_PATH, `callTool` and the plugin manifest, and nothing else.
 //
 // `sessionId` in every method is the host's public session id (the instance
 // row's `sessionId`), not the instance row's `id`.
 
 const MCP_PATH = '/mcp';
-const BOUNDARY = /^--- message \d+\/\d+ · .* chars ---\n?/;
 
 function mcpError(code, message, detail) {
   return Object.assign(new Error(message), { code, ...(detail !== undefined ? { detail } : {}) });
@@ -19,32 +19,17 @@ function parseJson(text) {
   try { return JSON.parse(text); } catch { return undefined; }
 }
 
-// Pairs get_recent_messages' metadata with its bodies, one entry per message,
-// dropping the boundary line the host prefixes when several messages return.
-export function pairMessages({ meta, bodies }) {
-  const messages = Array.isArray(meta?.messages) ? meta.messages : [];
-  return messages.map((m, i) => ({
-    msgId: m.msgId,
-    text: String(bodies[i] ?? '').replace(BOUNDARY, ''),
-    ...(m.hasPlan ? { hasPlan: true } : {}),
-    ...(m.planPath ? { planPath: m.planPath } : {}),
-    ...(typeof m.questionCount === 'number' ? { questionCount: m.questionCount } : {}),
-  }));
-}
-
 export function createHostMcp({ baseUrl, fetchImpl = fetch, timeoutMs = 10000 }) {
   let nextId = 0;
 
   // Resolves to the `content[].text` strings of a successful tool result.
-  async function callTool(name, args, { mutating = false } = {}) {
+  async function callTool(name, args) {
     const ctl = new AbortController();
     let timer;
     const timedOut = new Promise((_, reject) => {
       timer = setTimeout(() => {
         ctl.abort();
-        reject(mcpError('HOST_TIMEOUT', mutating
-          ? `code-conductor did not answer ${name} in time; it may have been delivered, so do not resend without checking`
-          : `code-conductor did not answer ${name} in time`));
+        reject(mcpError('HOST_TIMEOUT', `code-conductor did not answer ${name} in time; it may have been delivered, so do not resend without checking`));
       }, timeoutMs);
     });
     const exchange = (async () => {
@@ -85,7 +70,7 @@ export function createHostMcp({ baseUrl, fetchImpl = fetch, timeoutMs = 10000 })
   }
 
   async function objectResult(name, args) {
-    const texts = await callTool(name, args, { mutating: true });
+    const texts = await callTool(name, args);
     const out = parseJson(texts[0]);
     if (!out || typeof out !== 'object') throw mcpError('HOST_MCP_ERROR', `code-conductor ${name} returned an unreadable result`);
     return out;
@@ -94,14 +79,6 @@ export function createHostMcp({ baseUrl, fetchImpl = fetch, timeoutMs = 10000 })
   const withFeedback = (sessionId, feedback) => ({ sessionId, ...(feedback ? { feedback } : {}) });
 
   return {
-    // No `count` is sent: the host's default call bonds a trailing prose
-    // message back to the turn's plan/questions message.
-    async recentMessages(sessionId, { count } = {}) {
-      const texts = await callTool('get_recent_messages', { sessionId, ...(count !== undefined ? { count } : {}) });
-      const meta = parseJson(texts[0]);
-      if (!meta || typeof meta !== 'object') throw mcpError('HOST_MCP_ERROR', 'code-conductor get_recent_messages returned unreadable metadata');
-      return { meta, bodies: texts.slice(1) };
-    },
     answerQuestion: (sessionId, answers) => objectResult('answer_question', { sessionId, answers }),
     approvePlan: (sessionId, feedback) => objectResult('approve_plan', withFeedback(sessionId, feedback)),
     rejectPlan: (sessionId, feedback) => objectResult('reject_plan', withFeedback(sessionId, feedback)),

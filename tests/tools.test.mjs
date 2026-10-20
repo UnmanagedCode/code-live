@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startFakeHost } from './fakes/fakeHost.mjs';
 import { DECLARATIONS } from '../src/tools.js';
+import { PART_CHARS, MAX_TEXT } from '../src/hostEvents.js';
 import { startApp, callTool, req, CONDUCTOR_A, CONDUCTOR_B, WORKER } from './helpers.mjs';
 
 async function setup(t, { instances = [CONDUCTOR_A, CONDUCTOR_B, WORKER], events } = {}) {
@@ -19,11 +20,11 @@ async function setup(t, { instances = [CONDUCTOR_A, CONDUCTOR_B, WORKER], events
 const text = (t) => ({ kind: 'assistant_message', message: { content: [{ type: 'text', text: t }] } });
 const toolOnly = { kind: 'assistant_message', message: { content: [{ type: 'tool_use', id: 'x', name: 'Bash', input: {} }] } };
 
-const FIVE = ['send_to_conductor', 'read_conductor_messages', 'answer_conductor_question', 'approve_conductor_plan', 'reject_conductor_plan'];
+const CONDUCTOR_TOOLS = ['send_to_conductor', 'read_conductor_messages', 'answer_conductor_question', 'approve_conductor_plan', 'reject_conductor_plan'];
 
 test('every tool that acts on a conductor declares session as a required string', () => {
   const byName = Object.fromEntries(DECLARATIONS.map((d) => [d.name, d.parameters]));
-  for (const name of FIVE) {
+  for (const name of CONDUCTOR_TOOLS) {
     assert.ok(byName[name].required.includes('session'), `${name} requires session`);
     assert.equal(byName[name].properties.session.type, 'STRING', name);
   }
@@ -104,22 +105,29 @@ test('send by id or case-insensitive title starts announcing that conductor once
   assert.deepEqual(Object.keys(app.deps.state.get().watched).sort(), ['cond-a', 'cond-b']);
 });
 
+// Invariant: a read lists the last N text messages with their keys from the events route alone, and never starts announcing.
 test('read returns the last N text messages and never starts announcing', async (t) => {
   const { host, app } = await setup(t, {
     events: { 'cond-b': [text('one'), toolOnly, text('two'), { kind: 'turn_end' }, text('three'), toolOnly] },
   });
   const r = await callTool(app, 'read_conductor_messages', { session: 'cond-b', count: 2 });
-  assert.deepEqual(r, { ok: true, sessionId: 'cond-b', title: 'Build the beta release pipeline and report back on everythi…', messages: [{ text: 'two' }, { text: 'three' }] });
-  assert.deepEqual(host.mcpCalls.map((c) => [c.name, c.arguments]), [['get_recent_messages', { sessionId: 's-b', count: 2 }]]);
+  assert.deepEqual(r, {
+    ok: true,
+    sessionId: 'cond-b',
+    title: 'Build the beta release pipeline and report back on everythi…',
+    messages: [{ messageKey: '3-m3', text: 'two', totalChars: 3 }, { messageKey: '5-m5', text: 'three', totalChars: 5 }],
+    nextBefore: '3-m3',
+  });
+  assert.equal(host.mcpCalls.length, 0, 'reads use the events route only');
   assert.deepEqual(app.deps.state.get().watched, {});
   const one = await callTool(app, 'read_conductor_messages', { session: 'cond-b' });
-  assert.deepEqual(one.messages, [{ text: 'three' }]);
+  assert.deepEqual(one.messages, [{ messageKey: '5-m5', text: 'three', totalChars: 5 }]);
 });
 
 test('worker sessions are refused everywhere', async (t) => {
   const { host, app } = await setup(t);
   host.setRow('worker-1', { awaitingUser: 'plan', awaitingUserSource: 'tool' });
-  for (const name of FIVE) {
+  for (const name of CONDUCTOR_TOOLS) {
     const r = await callTool(app, name, { session: 'worker-1', text: 'x', confirmed: true, answers: [{ choices: ['1'] }] });
     assert.deepEqual([r.ok, r.code], [false, 'NOT_A_CONDUCTOR'], name);
   }
@@ -136,7 +144,7 @@ test('session resolution errors', async (t) => {
   const dup = { ...CONDUCTOR_B, id: 'cond-c', title: 'Alpha plan' };
   const { host, app } = await setup(t, { instances: [CONDUCTOR_A, dup, WORKER] });
   host.requests.length = 0;
-  for (const name of FIVE) {
+  for (const name of CONDUCTOR_TOOLS) {
     for (const session of [undefined, null, '', '   ']) {
       const r = await callTool(app, name, { text: 'x', confirmed: true, answers: [], ...(session === undefined ? {} : { session }) });
       assert.deepEqual([r.ok, r.code], [false, 'INVALID_ARGS'], `${name} ${JSON.stringify(session)}`);
@@ -145,7 +153,7 @@ test('session resolution errors', async (t) => {
     assert.equal((await callTool(app, name, { text: 'x', confirmed: true, answers: [], session: 5 })).message, 'session must be a string');
   }
   assert.equal(host.requests.length, 0, 'no host request for a missing session');
-  for (const name of FIVE) {
+  for (const name of CONDUCTOR_TOOLS) {
     const args = { text: 'x', confirmed: true, answers: [{ choices: ['1'] }] };
     const unknown = await callTool(app, name, { ...args, session: 'nope' });
     assert.equal(unknown.code, 'UNKNOWN_SESSION', name);
@@ -325,14 +333,13 @@ test('approve without confirmed:true makes no host call of any kind', async (t) 
   assert.equal(host.requests.length, 0, 'not even a REST read');
 });
 
-test('approve calls approve_plan after confirming a tool plan ask and a plan in the latest messages', async (t) => {
+// Invariant: approve confirms the row's tool plan ask and a plan_request with its ended turn from the events route,
+// then makes exactly one /mcp call, the write.
+test('approve calls approve_plan after confirming a tool plan ask and its plan event', async (t) => {
   const { host, app } = await askSetup(t, 'plan');
   host.setMcp('approve_plan', () => mcpOk({ sessionId: 's-a', mode: 'bypassPermissions', sentText: 'Approved.' }));
   const r = await callTool(app, 'approve_conductor_plan', { session: 'cond-a', confirmed: true, feedback: 'go ahead' });
-  assert.deepEqual(host.mcpCalls.map((c) => [c.name, c.arguments]), [
-    ['get_recent_messages', { sessionId: 's-a' }],
-    ['approve_plan', { sessionId: 's-a', feedback: 'go ahead' }],
-  ]);
+  assert.deepEqual(host.mcpCalls.map((c) => [c.name, c.arguments]), [['approve_plan', { sessionId: 's-a', feedback: 'go ahead' }]]);
   assert.equal(r.ok, true);
   assert.deepEqual([r.sessionId, r.title, r.mode, r.delivered], ['cond-a', 'Alpha plan', 'bypassPermissions', true]);
   assert.match(r.note, /without permission prompts/);
@@ -340,32 +347,32 @@ test('approve calls approve_plan after confirming a tool plan ask and a plan in 
   assert.deepEqual(called(host, 'approve_plan')[1].arguments, { sessionId: 's-a' });
 });
 
-test('approve and reject need a tool plan ask on the row and a plan in the host latest messages', async (t) => {
+// Invariant: approve and reject need the row's tool plan ask and a plan_request whose turn ended; each refusal comes
+// before any /mcp call.
+test('approve and reject need a tool plan ask on the row and a plan event with its turn end', async (t) => {
   const { host, app } = await askSetup(t, 'plan');
   for (const name of ['approve_conductor_plan', 'reject_conductor_plan']) {
     const args = name.startsWith('approve') ? { session: 'cond-a', confirmed: true } : { session: 'cond-a' };
-    // The row shows a question, not a plan: refused before any host call.
+    // The row shows a question, not a plan.
     host.setRow('cond-a', { awaitingUser: 'question', awaitingUserSource: 'tool' });
-    host.mcpCalls.length = 0;
     const wrongAsk = await callTool(app, name, args);
     assert.equal(wrongAsk.code, 'NO_PENDING_PLAN', name);
     assert.match(wrongAsk.message, /approval of a plan/);
-    assert.equal(host.mcpCalls.length, 0);
     // Answered or auto-approved: the row shows nothing.
     host.setRow('cond-a', { awaitingUser: null, awaitingUserSource: null });
     assert.equal((await callTool(app, name, args)).code, 'NO_PENDING_PLAN', name);
-    assert.equal(host.mcpCalls.length, 0);
-    // The row says plan, but the host's fresh messages carry none.
+    // The row says plan, but the events hold no plan_request.
     host.setRow('cond-a', { awaitingUser: 'plan', awaitingUserSource: 'tool' });
-    host.addEvent('cond-a', { kind: 'turn_end' });
-    host.addEvent('cond-a', { kind: 'assistant_message', msgId: `later-${name}`, message: { content: [{ type: 'text', text: 'no plan here' }] } });
+    host.resetRing('cond-a', { drop: (ev) => ev.kind === 'plan_request' });
     const noPlan = await callTool(app, name, args);
     assert.equal(noPlan.code, 'NO_PENDING_PLAN', name);
-    assert.match(noPlan.message, /no plan in its latest messages/);
-    assert.deepEqual(host.mcpCalls.map((c) => c.name), ['get_recent_messages'], 'verified, then stopped');
-    host.addEvent('cond-a', { kind: 'turn_end' });
+    assert.match(noPlan.message, /no plan in its latest events/);
+    // A plan_request whose turn has not ended is not yet decidable.
+    host.addEvent('cond-a', { kind: 'plan_request', toolUseId: `open-${name}`, plan: 'Still being written' });
+    assert.equal((await callTool(app, name, args)).code, 'NO_PENDING_PLAN', name);
+    host.resetRing('cond-a', { drop: (ev) => ev.kind === 'plan_request' });
+    assert.equal(host.mcpCalls.length, 0, 'every refusal came before any /mcp call');
   }
-  assert.equal(called(host, 'approve_plan').length + called(host, 'reject_plan').length, 0);
 });
 
 test('reject passes the feedback and keeps the mode the host reports', async (t) => {
@@ -433,10 +440,10 @@ test('approving or rejecting one conductor never touches another that is also wa
   host.setMcp('approve_plan', (args) => mcpOk({ sessionId: args.sessionId, mode: 'bypassPermissions', sentText: 'ok' }));
   host.setMcp('reject_plan', (args) => mcpOk({ sessionId: args.sessionId, mode: 'plan', sentText: 'no' }));
   assert.equal((await callTool(app, 'approve_conductor_plan', { session: 'cond-a', confirmed: true })).sessionId, 'cond-a');
-  assert.deepEqual(host.mcpCalls.map((c) => [c.name, c.arguments.sessionId]), [['get_recent_messages', 's-a'], ['approve_plan', 's-a']]);
+  assert.deepEqual(host.mcpCalls.map((c) => [c.name, c.arguments.sessionId]), [['approve_plan', 's-a']]);
   host.mcpCalls.length = 0;
   assert.equal((await callTool(app, 'reject_conductor_plan', { session: 'cond-b', feedback: 'smaller' })).sessionId, 'cond-b');
-  assert.deepEqual(host.mcpCalls.map((c) => [c.name, c.arguments.sessionId]), [['get_recent_messages', 's-b'], ['reject_plan', 's-b']]);
+  assert.deepEqual(host.mcpCalls.map((c) => [c.name, c.arguments.sessionId]), [['reject_plan', 's-b']]);
 });
 
 test('a named conductor with no pending ask is refused while another conductor waits', async (t) => {
@@ -460,10 +467,23 @@ test('a named conductor with no pending ask is refused while another conductor w
   }
 });
 
-// ---- read_conductor_messages through the host's MCP ----
+// ---- read_conductor_messages over the events route ----
 
 const say = (msgId, t) => ({ kind: 'assistant_message', msgId, message: { content: [{ type: 'text', text: t }] } });
 
+const BIG_PLAN = Array.from({ length: 1500 }, (_, i) => `${i + 1}. step number ${i + 1} of the plan`).join('\n') + '\nLAST-LINE-UNIQUE';
+
+// Every part of one message, read through its key: the part results, in order.
+async function readParts(app, messageKey, session = 'cond-a') {
+  const first = await callTool(app, 'read_conductor_messages', { session, messageKey });
+  assert.equal(first.ok, true, JSON.stringify(first));
+  const results = [first];
+  for (let part = 2; part <= first.parts; part++) results.push(await callTool(app, 'read_conductor_messages', { session, messageKey, part }));
+  return results;
+}
+
+// Invariant: the latest message and the plan or questions its turn ended on come back bonded, each with its key and
+// ask markers, and the trailing prose carries no markers.
 test('read returns the latest message bonded to the turn plan or questions, with the ask markers', async (t) => {
   const { host, app } = await setup(t, {
     events: {
@@ -475,34 +495,335 @@ test('read returns the latest message bonded to the turn plan or questions, with
     },
   });
   const r = await callTool(app, 'read_conductor_messages', { session: 'cond-a' });
-  assert.deepEqual(host.mcpCalls.map((c) => [c.name, c.arguments]), [['get_recent_messages', { sessionId: 's-a' }]]);
+  assert.equal(host.mcpCalls.length, 0);
   assert.equal(r.ok, true);
   assert.equal(r.messages.length, 2);
-  assert.equal(r.messages[0].questionCount, 2);
+  assert.deepEqual([r.messages[0].messageKey, r.messages[0].questionCount], ['3-q', 2]);
   assert.match(r.messages[0].text, /^Two questions\.\n--- questions ---\n1\. Which database\? \(multiSelect: false\) · header: DB\n   - Postgres \(Recommended\): robust\n   - SQLite: tiny\n2\./);
-  assert.deepEqual(r.messages[1], { text: 'Waiting for your answers.' }, 'the trailing prose carries no ask markers');
-  assert.doesNotMatch(r.messages[0].text, /message 1\/2/, 'the host boundary line is dropped');
+  assert.deepEqual(r.messages[1], { messageKey: '5-after', text: 'Waiting for your answers.', totalChars: 25 }, 'the trailing prose carries no ask markers');
 });
 
+// Invariant: a plan turn lists hasPlan and planPath, and the body carries the host's plan fence.
 test('read reports hasPlan and planPath for a plan turn', async (t) => {
   const { host, app } = await setup(t);
   host.finishAsk('cond-a', { kind: 'plan', plan: 'Step 1', planPath: '/plans/p.md', prose: 'Plan below.', frames: false });
   const r = await callTool(app, 'read_conductor_messages', { session: 'cond-a' });
-  assert.deepEqual(r.messages, [{ text: 'Plan below.\n--- plan · saved to /plans/p.md ---\nStep 1', hasPlan: true, planPath: '/plans/p.md' }]);
+  const text = 'Plan below.\n--- plan · saved to /plans/p.md ---\nStep 1';
+  assert.deepEqual(r.messages, [{ messageKey: '1-m1', text, totalChars: text.length, hasPlan: true, planPath: '/plans/p.md' }]);
 });
 
-test('an explicit count is passed through and returns exactly that many messages, unbonded', async (t) => {
+// Invariant: a reply over PART_CHARS lists cut (truncated, totalChars, text within MAX_TEXT, a hint) and pages back,
+// from part 1 to parts, to exactly its body, each part within PART_CHARS, with no /mcp call.
+test('long prose lists truncated and reads back whole by its messageKey', async (t) => {
+  const { host, app } = await setup(t);
+  const prose = Array.from({ length: Math.ceil(PART_CHARS * 2.5 / 20) }, (_, i) => `line ${i} of the reply`).join('\n');
+  host.finishTurn('cond-a', prose, { notify: false });
+  const listing = await callTool(app, 'read_conductor_messages', { session: 'cond-a' });
+  const [m] = listing.messages;
+  assert.equal(m.truncated, true);
+  assert.equal(m.totalChars, prose.length);
+  assert.ok(m.text.length <= MAX_TEXT);
+  assert.match(listing.hint, /read each whole with its messageKey/);
+  const results = await readParts(app, m.messageKey);
+  assert.equal(results.length, 3);
+  assert.equal(results.map((r) => r.text).join(''), prose);
+  results.forEach((r, i) => {
+    assert.ok(r.text.length <= PART_CHARS);
+    assert.deepEqual([r.part, r.parts, r.totalChars, r.messageKey], [i + 1, 3, prose.length, m.messageKey]);
+  });
+  assert.equal(host.mcpCalls.length, 0);
+  assert.deepEqual(app.deps.state.get().watched, {}, 'reading never starts announcing');
+});
+
+// Invariant: a plan over MAX_TEXT reads back whole whether the plan sits in the ExitPlanMode input or only on the
+// plan_request (the file-backed case), with its plan file named.
+test('a long plan reads back whole, with the plan in the tool input or only on the plan_request', async (t) => {
+  for (const inputPlan of [true, false]) {
+    const { host, app } = await setup(t);
+    host.finishAsk('cond-a', { kind: 'plan', plan: BIG_PLAN, planPath: '/plans/p.md', prose: 'The plan.', inputPlan, frames: false });
+    const [m] = (await callTool(app, 'read_conductor_messages', { session: 'cond-a' })).messages;
+    assert.deepEqual([m.hasPlan, m.planPath, m.truncated], [true, '/plans/p.md', true]);
+    const results = await readParts(app, m.messageKey);
+    assert.equal(results.map((r) => r.text).join(''), `The plan.\n--- plan · saved to /plans/p.md ---\n${BIG_PLAN}`, `inputPlan ${inputPlan}`);
+    assert.equal(results[0].hasPlan, true);
+  }
+});
+
+// Invariant: a plan_request carrying autoApproved:true is a plan like any other and reads back whole.
+test('an auto-approved plan reads back whole', async (t) => {
+  const { host, app } = await setup(t);
+  host.finishAsk('cond-a', { kind: 'plan', plan: BIG_PLAN, autoApproved: true, frames: false, row: { awaitingUser: null, awaitingUserSource: null } });
+  const [m] = (await callTool(app, 'read_conductor_messages', { session: 'cond-a' })).messages;
+  assert.equal((await readParts(app, m.messageKey)).map((r) => r.text).join(''), `Before I continue:\n--- plan ---\n${BIG_PLAN}`);
+});
+
+// Invariant: the hard-cut path (no newline in reach) still loses nothing.
+test('a body with no newlines reads back whole', async (t) => {
+  const { host, app } = await setup(t);
+  const prose = 'x'.repeat(PART_CHARS * 2 + 5);
+  host.finishTurn('cond-a', prose, { notify: false });
+  const [m] = (await callTool(app, 'read_conductor_messages', { session: 'cond-a' })).messages;
+  const results = await readParts(app, m.messageKey);
+  assert.equal(results.length, 3);
+  assert.equal(results.map((r) => r.text).join(''), prose);
+});
+
+// Invariant: a message within MAX_TEXT, and questions that fit, list without truncated and without a hint.
+test('a short message and fitting questions list without truncation flags', async (t) => {
+  const { host, app } = await setup(t);
+  host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, prose: 'Short.', frames: false });
+  const r = await callTool(app, 'read_conductor_messages', { session: 'cond-a' });
+  assert.equal('truncated' in r.messages[0], false);
+  assert.equal('hint' in r, false);
+});
+
+// Invariant: a sub-agent's message never lists, and its key reads as MESSAGE_NOT_FOUND, not its text.
+test('a sub-agent message is excluded from listings and from key reads', async (t) => {
+  const { host, app } = await setup(t, {
+    events: { 'cond-a': [say('main', 'the conductor speaking'), { ...say('sub', 'x'.repeat(9000)), parentToolUseId: 'toolu_task' }, { kind: 'turn_end' }] },
+  });
+  const r = await callTool(app, 'read_conductor_messages', { session: 'cond-a', count: 5 });
+  assert.deepEqual(r.messages.map((m) => m.text), ['the conductor speaking']);
+  const key = await callTool(app, 'read_conductor_messages', { session: 'cond-a', messageKey: '2-sub' });
+  assert.deepEqual([key.ok, key.code], [false, 'MESSAGE_NOT_FOUND']);
+  assert.equal(host.mcpCalls.length, 0);
+});
+
+// Invariant: a message older than the in-memory ring (served from disk as deltas only, past the first events page) is
+// reachable by paging back with nextBefore and reads whole by its key.
+test('a message older than the ring is reached with nextBefore and read whole', async (t) => {
+  const { host, app } = await setup(t);
+  const old = Array.from({ length: 900 }, (_, i) => `archived line ${i}`).join('\n');
+  host.finishTurn('cond-a', old, { notify: false });
+  for (let i = 0; i < 600; i++) host.addEvent('cond-a', { kind: 'tool_use', name: 'Bash' });
+  host.finishTurn('cond-a', 'the newest message', { notify: false });
+  host.archiveBelow('cond-a', 300);
+  const latest = await callTool(app, 'read_conductor_messages', { session: 'cond-a' });
+  assert.deepEqual(latest.messages.map((m) => m.text), ['the newest message']);
+  assert.ok(latest.nextBefore, 'older messages exist');
+  const older = await callTool(app, 'read_conductor_messages', { session: 'cond-a', before: latest.nextBefore });
+  assert.equal(older.messages.length, 1);
+  assert.equal(older.messages[0].truncated, true);
+  assert.equal(older.messages[0].totalChars, old.length);
+  assert.equal(older.nextBefore, undefined, 'nothing is older');
+  assert.equal((await readParts(app, older.messages[0].messageKey)).map((r) => r.text).join(''), old);
+});
+
+// Adds `n` top-level events that belong to no message (tool traffic) to a conductor.
+const noise = (host, n, id = 'cond-a') => { for (let i = 0; i < n; i++) host.addEvent(id, { kind: 'tool_use', name: 'Bash', input: {} }); };
+// Adds a message streamed as one message_start and `deltas` text_deltas of `chunk`.
+function streamLong(host, msgId, deltas, chunk = 'word ', id = 'cond-a') {
+  host.addEvent(id, { kind: 'message_start', msgId });
+  for (let i = 0; i < deltas; i++) host.addEvent(id, { kind: 'text_delta', msgId, blockIdx: 0, text: chunk });
+}
+
+// Invariant: a window that ends inside a plan message never drops that message: the plan bonded to the trailing prose
+// of its turn is listed with it, though the host has older events than the newest page.
+test('a plan message at the old end of the newest page is listed, bonded to the trailing prose', async (t) => {
+  const { host, app } = await setup(t);
+  noise(host, 99);
+  host.addEvent('cond-a', { kind: 'turn_end' });
+  host.addEvent('cond-a', { kind: 'message_start', msgId: 'plan-msg' });
+  host.addEvent('cond-a', { kind: 'text_delta', msgId: 'plan-msg', blockIdx: 0, text: 'The plan.' });
+  host.addEvent('cond-a', { kind: 'tool_use', msgId: 'plan-msg', blockIdx: 1, toolUseId: 'tuP', name: 'ExitPlanMode', input: { plan: 'Step 1' } });
+  host.addEvent('cond-a', { kind: 'plan_request', toolUseId: 'tuP', plan: 'Step 1', planPath: null });
+  host.addEvent('cond-a', { kind: 'message_start', msgId: 'prose-msg' });
+  host.addEvent('cond-a', { kind: 'text_delta', msgId: 'prose-msg', blockIdx: 0, text: 'Waiting for approval.' });
+  noise(host, 441);
+  const r = await callTool(app, 'read_conductor_messages', { session: 'cond-a' });
+  assert.deepEqual(r.messages.map((m) => [m.messageKey, m.hasPlan ?? false]), [['101-plan-msg', true], ['105-prose-msg', false]]);
+  assert.equal(r.messages[0].text, 'The plan.\n--- plan ---\nStep 1');
+});
+
+// Invariant: a message longer than several event pages is listed whole (its start found by reading back), never
+// dropped as a fragment and never an empty success; its key then reads it whole.
+test('one message of thousands of events lists and reads back whole', async (t) => {
+  const { host, app } = await setup(t);
+  streamLong(host, 'long', 4500);
+  host.addEvent('cond-a', { kind: 'turn_end' });
+  const body = 'word '.repeat(4500);
+  for (const args of [{}, { count: 1 }]) {
+    const r = await callTool(app, 'read_conductor_messages', { session: 'cond-a', ...args });
+    assert.equal(r.ok, true, JSON.stringify(args));
+    assert.deepEqual(r.messages.map((m) => [m.messageKey, m.totalChars, m.truncated]), [['1-long', body.length, true]], JSON.stringify(args));
+    assert.match(r.hint, /read each whole/);
+  }
+  assert.equal((await readParts(app, '1-long')).map((p) => p.text).join(''), body);
+});
+
+// Invariant: when no whole message lies within the reach of a read, a listing is refused, never an empty success; a
+// keyed read of a message that does not close within its page bound is refused, never returned as a fragment.
+test('a message beyond the read bound is refused by both reads', async (t) => {
+  const { host, app } = await setup(t);
+  streamLong(host, 'huge', 33_000, 'x');
+  host.addEvent('cond-a', { kind: 'turn_end' });
+  const listing = await callTool(app, 'read_conductor_messages', { session: 'cond-a' });
+  assert.deepEqual([listing.ok, listing.code], [false, 'MESSAGES_NOT_REACHED']);
+  const keyed = await callTool(app, 'read_conductor_messages', { session: 'cond-a', messageKey: '1-huge' });
+  assert.deepEqual([keyed.ok, keyed.code], [false, 'MESSAGE_TOO_LONG']);
+});
+
+// Invariant: a message still being written reads as what has arrived, and says so; once its turn ends it does not.
+test('a message still being written is read with inProgress until it closes', async (t) => {
+  const { host, app } = await setup(t);
+  streamLong(host, 'live', 3, 'abc ');
+  const open = await callTool(app, 'read_conductor_messages', { session: 'cond-a', messageKey: '1-live' });
+  assert.deepEqual([open.ok, open.inProgress, open.text], [true, true, 'abc abc abc ']);
+  host.addEvent('cond-a', { kind: 'turn_end' });
+  const closed = await callTool(app, 'read_conductor_messages', { session: 'cond-a', messageKey: '1-live' });
+  assert.equal('inProgress' in closed, false);
+});
+
+// Invariant: a key whose seq a respawn has moved into the middle of the same message (same msgId, so the msgId check
+// passes) is MESSAGE_NOT_FOUND, never the tail of that message.
+test('a key that lands inside its own renumbered message is MESSAGE_NOT_FOUND, not the tail', async (t) => {
+  const { host, app } = await setup(t);
+  noise(host, 2);
+  for (const chunk of ['Hello ', 'beautiful ', 'world']) host.addEvent('cond-a', { kind: 'text_delta', msgId: 'X', blockIdx: 0, text: chunk });
+  host.addEvent('cond-a', { kind: 'turn_end' });
+  const [m] = (await callTool(app, 'read_conductor_messages', { session: 'cond-a' })).messages;
+  assert.deepEqual([m.messageKey, m.text], ['3-X', 'Hello beautiful world']);
+  host.resetRing('cond-a', { drop: (ev) => ev.msgId === undefined && ev.kind === 'tool_use' });
+  const stale = await callTool(app, 'read_conductor_messages', { session: 'cond-a', messageKey: m.messageKey });
+  assert.deepEqual([stale.ok, stale.code], [false, 'MESSAGE_NOT_FOUND']);
+  const fresh = await callTool(app, 'read_conductor_messages', { session: 'cond-a', messageKey: '1-X' });
+  assert.equal(fresh.text, 'Hello beautiful world');
+});
+
+// Invariant: when the newest page begins on a block opener of a message (not its first event), the listing does not
+// present that message's tail as the whole: it reads back to the message's start, and the keyed read returns the same
+// whole body.
+test('a page that begins on a block opener of a message lists and reads that message whole', async (t) => {
+  const { host, app } = await setup(t);
+  host.addEvent('cond-a', { kind: 'turn_end' });
+  const start = host.addEvent('cond-a', { kind: 'message_start', msgId: 'm' });
+  host.addEvent('cond-a', { kind: 'text_delta', msgId: 'm', blockIdx: 0, text: 'FIRST ' });
+  host.addEvent('cond-a', { kind: 'text_end', msgId: 'm', blockIdx: 0 });
+  const seam = host.addEvent('cond-a', { kind: 'thinking_start', msgId: 'm', blockIdx: 1 });
+  host.addEvent('cond-a', { kind: 'thinking_delta', msgId: 'm', blockIdx: 1, text: 'Narrating.', narration: true });
+  host.addEvent('cond-a', { kind: 'text_delta', msgId: 'm', blockIdx: 2, text: 'SECOND ' });
+  host.addEvent('cond-a', { kind: 'tool_use', msgId: 'm', blockIdx: 3, toolUseId: 'tuP', name: 'ExitPlanMode', input: { plan: 'Step 1' } });
+  host.addEvent('cond-a', { kind: 'plan_request', toolUseId: 'tuP', plan: 'Step 1', planPath: null });
+  host.addEvent('cond-a', { kind: 'message_start', msgId: 'tail' });
+  const last = host.addEvent('cond-a', { kind: 'text_delta', msgId: 'tail', blockIdx: 0, text: 'Waiting for approval.' });
+  noise(host, seam._seq + 499 - last._seq);
+  assert.equal(host.state.events['cond-a'].at(-500)._seq, seam._seq, 'the newest page begins on the thinking_start');
+  const body = 'FIRST SECOND \n--- narration ---\nNarrating.\n--- plan ---\nStep 1';
+  const r = await callTool(app, 'read_conductor_messages', { session: 'cond-a' });
+  assert.deepEqual(r.messages.map((m) => [m.messageKey, m.text]), [[`${start._seq}-m`, body], [`${last._seq - 1}-tail`, 'Waiting for approval.']]);
+  const read = await callTool(app, 'read_conductor_messages', { session: 'cond-a', messageKey: `${start._seq}-m` });
+  assert.deepEqual([read.ok, read.text, read.totalChars], [true, body, body.length]);
+  // A key pointing at the first delta after the seam is a fragment, not the message.
+  const forged = await callTool(app, 'read_conductor_messages', { session: 'cond-a', messageKey: `${seam._seq + 2}-m` });
+  assert.deepEqual([forged.ok, forged.code], [false, 'MESSAGE_NOT_FOUND']);
+});
+
+// Invariant: on a ring with no message_start (after a resume, respawn or rewind the host replays history without it),
+// the default read still returns the turn's plan message bonded with its trailing prose: a left-out oldest message of
+// the last message's turn is read past, not mistaken for the end of the bond.
+test('the default read keeps the bonded plan on a ring without message_start', async (t) => {
+  const { host, app } = await setup(t);
+  noise(host, 99);
+  host.addEvent('cond-a', { kind: 'turn_end' });
+  host.addEvent('cond-a', { kind: 'message_start', msgId: 'plan-msg' });
+  host.addEvent('cond-a', { kind: 'text_delta', msgId: 'plan-msg', blockIdx: 0, text: 'Plan message.' });
+  host.addEvent('cond-a', { kind: 'tool_use', msgId: 'plan-msg', blockIdx: 1, toolUseId: 'tuP', name: 'ExitPlanMode', input: { plan: 'Step 1' } });
+  host.addEvent('cond-a', { kind: 'plan_request', toolUseId: 'tuP', plan: 'Step 1', planPath: null });
+  host.addEvent('cond-a', { kind: 'message_start', msgId: 'prose-msg' });
+  host.addEvent('cond-a', { kind: 'text_delta', msgId: 'prose-msg', blockIdx: 0, text: 'Waiting for approval.' });
+  host.addEvent('cond-a', { kind: 'turn_end' });
+  noise(host, 441);
+  host.resetRing('cond-a', { drop: (ev) => ev.kind === 'message_start' });
+  const r = await callTool(app, 'read_conductor_messages', { session: 'cond-a' });
+  assert.deepEqual(r.messages.map((m) => [m.hasPlan ?? false, m.text]), [[true, 'Plan message.\n--- plan ---\nStep 1'], [false, 'Waiting for approval.']]);
+  assert.equal('hint' in r, false);
+});
+
+// Invariant: when the bound stops a default read before a replayed ring's plan message can be kept, the result says
+// the turn's start is out of reach instead of presenting the trailing prose as the whole bond.
+test('a default read that cannot reach the bonded plan on a replayed ring carries the turn hint', async (t) => {
+  const { host, app } = await setup(t);
+  host.addEvent('cond-a', { kind: 'turn_end' });
+  host.addEvent('cond-a', { kind: 'text_delta', msgId: 'plan-msg', blockIdx: 0, text: 'Plan message.' });
+  host.addEvent('cond-a', { kind: 'tool_use', msgId: 'plan-msg', blockIdx: 1, toolUseId: 'tuP', name: 'ExitPlanMode', input: { plan: 'Step 1' } });
+  host.addEvent('cond-a', { kind: 'plan_request', toolUseId: 'tuP', plan: 'Step 1', planPath: null });
+  noise(host, 32_000);
+  host.addEvent('cond-a', { kind: 'text_delta', msgId: 'mid-msg', blockIdx: 0, text: 'Narration between.' });
+  noise(host, 50);
+  host.addEvent('cond-a', { kind: 'text_delta', msgId: 'prose-msg', blockIdx: 0, text: 'Waiting for approval.' });
+  const r = await callTool(app, 'read_conductor_messages', { session: 'cond-a' });
+  assert.deepEqual(r.messages.map((m) => m.text), ['Waiting for approval.']);
+  assert.match(r.hint, /start of this turn is further back/);
+  assert.ok(r.nextBefore);
+});
+
+// Invariant: a key never yields another message's text: an unknown key, and a key whose seq a respawn reassigned to a
+// different message, are both MESSAGE_NOT_FOUND.
+test('an unknown key and a renumbered key are MESSAGE_NOT_FOUND', async (t) => {
+  const { host, app } = await setup(t);
+  host.finishTurn('cond-a', 'first', { notify: false });
+  host.finishTurn('cond-a', 'second', { notify: false });
+  host.finishTurn('cond-a', 'third', { notify: false });
+  const listed = await callTool(app, 'read_conductor_messages', { session: 'cond-a', count: 3 });
+  const keys = listed.messages.map((m) => m.messageKey);
+  assert.deepEqual(keys, ['1-m1', '6-m6', '11-m11']);
+  for (const key of ['99-nothing', '6-m1']) {
+    const r = await callTool(app, 'read_conductor_messages', { session: 'cond-a', messageKey: key });
+    assert.deepEqual([r.ok, r.code], [false, 'MESSAGE_NOT_FOUND'], key);
+    assert.match(r.message, /list the messages again/);
+  }
+  // The first message is dropped and the rest renumbered: seq 6 now starts the third message.
+  host.resetRing('cond-a', { drop: (ev) => ev.msgId === 'm1' || ev._seq <= 5 });
+  const stale = await callTool(app, 'read_conductor_messages', { session: 'cond-a', messageKey: keys[1] });
+  assert.deepEqual([stale.ok, stale.code], [false, 'MESSAGE_NOT_FOUND']);
+});
+
+// Invariant: a part past the end is NO_SUCH_PART with expected/got; bad argument combinations are INVALID_ARGS before
+// any host request.
+test('read refuses a part past the end and bad argument combinations', async (t) => {
+  const { host, app } = await setup(t);
+  host.finishTurn('cond-a', 'short reply', { notify: false });
+  const [m] = (await callTool(app, 'read_conductor_messages', { session: 'cond-a' })).messages;
+  const past = await callTool(app, 'read_conductor_messages', { session: 'cond-a', messageKey: m.messageKey, part: 2 });
+  assert.deepEqual([past.code, past.expected, past.got], ['NO_SUCH_PART', 1, 2]);
+  host.requests.length = 0;
+  const key = m.messageKey;
+  for (const args of [
+    { part: 1 },
+    { messageKey: key, count: 2 },
+    { messageKey: key, before: key },
+    { messageKey: 'nonsense' },
+    { messageKey: '-m1' },
+    { messageKey: '1-' },
+    { messageKey: key, part: 0 },
+    { messageKey: key, part: 1.5 },
+    { messageKey: key, part: '2' },
+    { before: 'x' },
+    { messageKey: 7 },
+  ]) {
+    const r = await callTool(app, 'read_conductor_messages', { session: 'cond-a', ...args });
+    assert.deepEqual([r.ok, r.code], [false, 'INVALID_ARGS'], JSON.stringify(args));
+  }
+  assert.equal(host.requests.length, 0);
+});
+
+// Invariant: an explicit count is literal (no bonding) and `before` lists the messages before a key, each over the
+// events route.
+test('count is literal and before pages to older messages', async (t) => {
   const { host, app } = await setup(t, {
     events: { 'cond-a': [say('q', 'Question turn.'), { kind: 'user_question', questions: QUESTIONS }, say('after', 'Trailing prose.'), { kind: 'turn_end' }] },
   });
   const one = await callTool(app, 'read_conductor_messages', { session: 'cond-a', count: 1 });
-  assert.deepEqual(host.mcpCalls[0].arguments, { sessionId: 's-a', count: 1 });
-  assert.deepEqual(one.messages, [{ text: 'Trailing prose.' }], 'count:1 is literal: the question message is not pulled in');
+  assert.deepEqual(one.messages.map((m) => m.text), ['Trailing prose.'], 'count:1 is literal: the question message is not pulled in');
   const two = await callTool(app, 'read_conductor_messages', { session: 'cond-a', count: 2 });
   assert.deepEqual(two.messages.map((m) => m.questionCount ?? null), [2, null]);
   assert.deepEqual(two.messages.map((m) => m.text.split('\n')[0]), ['Question turn.', 'Trailing prose.']);
+  const before = await callTool(app, 'read_conductor_messages', { session: 'cond-a', before: one.nextBefore });
+  assert.deepEqual(before.messages.map((m) => m.messageKey), ['1-q']);
+  assert.equal(host.mcpCalls.length, 0);
 });
 
+// Invariant: a long questions section stays whole at the end of a cut listing.
 test('a long read keeps the questions whole', async (t) => {
   const { host, app } = await setup(t);
   host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, prose: 'word '.repeat(2000), frames: false });
@@ -512,20 +833,13 @@ test('a long read keeps the questions whole', async (t) => {
   assert.equal(m.questionCount, 2);
 });
 
-test('read falls back to the /events prose, logged, when the MCP read fails or the session has no id', async (t) => {
+// Invariant: a read needs only the events route: a conductor with no host session id is read, and no /mcp call is made.
+test('read works without a host session id and makes no /mcp call', async (t) => {
   const { host, app } = await setup(t, { events: { 'cond-a': [say('a', 'one'), toolOnly, say('b', 'two')] } });
-  const logged = t.mock.method(console, 'error', () => {});
-  host.setMcp('get_recent_messages', () => mcpThrown('boom'));
-  const down = await callTool(app, 'read_conductor_messages', { session: 'cond-a', count: 2 });
-  assert.deepEqual(down, { ok: true, sessionId: 'cond-a', title: 'Alpha plan', messages: [{ text: 'one' }, { text: 'two' }] });
-  assert.ok(logged.mock.calls.some((c) => /get_recent_messages failed/.test(String(c.arguments[0]))));
-  assert.deepEqual((await callTool(app, 'read_conductor_messages', { session: 'cond-a' })).messages, [{ text: 'two' }], 'no count reads the last message');
-  host.setMcp('get_recent_messages', undefined);
   host.setRow('cond-a', { sessionId: null });
-  host.mcpCalls.length = 0;
-  assert.deepEqual((await callTool(app, 'read_conductor_messages', { session: 'cond-a' })).messages, [{ text: 'two' }]);
+  const r = await callTool(app, 'read_conductor_messages', { session: 'cond-a' });
+  assert.deepEqual(r.messages.map((m) => m.text), ['two']);
   assert.equal(host.mcpCalls.length, 0);
-  assert.ok(logged.mock.calls.some((c) => /no host session id/.test(String(c.arguments[0]))));
 });
 
 // ---- review fixes ----

@@ -77,6 +77,53 @@ test('a plan announce ends with the AWAITING PLAN APPROVAL line, with the plan f
   assert.deepEqual(entries().map((e) => e.label), ['Conductor · Alpha · plan', 'Conductor · Alpha · plan']);
 });
 
+// Invariant: a cut update (truncated, with messageKeys) ends with one line naming read_conductor_messages, its session
+// and each key, whether or not it asks something; an uncut update has no such line.
+test("a cut update's last line names read_conductor_messages, the session and every key", async () => {
+  const { es, sent } = await setup('live');
+  es.emit('announce', { sessionId: 'c', title: 'Alpha', text: 'cut plan', ask: { kind: 'plan', planPath: null }, truncated: true, messageKeys: ['5-m5', '9-m9'] });
+  es.emit('announce', { sessionId: 'c', title: 'Alpha', text: 'long reply', ask: null, truncated: true, messageKeys: ['7-m7'] });
+  es.emit('announce', { sessionId: 'c', title: 'Alpha', text: 'whole plan', ask: { kind: 'plan', planPath: null } });
+  const last = (text) => text.split('\n').at(-1);
+  assert.ok(sent[0].includes('AWAITING PLAN APPROVAL'));
+  for (const [text, keys] of [[sent[0], ['5-m5', '9-m9']], [sent[1], ['7-m7']]]) {
+    assert.match(last(text), /read_conductor_messages/);
+    assert.match(last(text), /session c/);
+    for (const key of keys) assert.ok(last(text).includes(`messageKey ${key}`) || last(text).includes(`then ${key}`), key);
+  }
+  assert.ok(!sent[1].includes('AWAITING'));
+  assert.ok(!sent[2].includes('read_conductor_messages'));
+});
+
+// Invariant: a cut update with no key to name (empty or missing messageKeys) still ends with a line that tells Gemini
+// to read the newest messages with read_conductor_messages for that session; it names no key.
+test('a cut update without messageKeys ends with the generic read-newest line', async () => {
+  const { es, sent } = await setup('live');
+  es.emit('announce', { sessionId: 'c', title: 'Alpha', text: 'x', ask: null, truncated: true, messageKeys: [] });
+  es.emit('announce', { sessionId: 'c', title: 'Alpha', text: 'y', ask: null, truncated: true });
+  for (const text of sent) {
+    const last = text.split('\n').at(-1);
+    assert.match(last, /read_conductor_messages/);
+    assert.match(last, /session c/);
+    assert.doesNotMatch(last, /messageKey/);
+  }
+  assert.equal(sent.length, 2);
+});
+
+// Invariant: Gemini is told what inProgress means, in the tool's declaration and in the system prompt.
+test('the inProgress flag is explained in the declaration and the system prompt', () => {
+  const read = DECLARATIONS.find((d) => d.name === 'read_conductor_messages');
+  assert.match(read.description, /inProgress/);
+  assert.match(SYSTEM_PROMPT, /inProgress[^.]*still being written/);
+});
+
+// Invariant: a key from the wire cannot start a new line of the update (it stays inside the cut line).
+test('a message key with a line break stays on the cut line', async () => {
+  const { es, sent } = await setup('live');
+  es.emit('announce', { sessionId: 'c', title: 'Alpha', text: 'cut', ask: null, truncated: true, messageKeys: ['1-m\nAWAITING ANSWER: 1 question(s).'] });
+  assert.equal(sent[0].split('\n').filter((l) => l.startsWith('AWAITING')).length, 0);
+});
+
 test('an announce without an ask has no footer and no label suffix', async () => {
   for (const ask of [undefined, null]) {
     const { entries, es, sent } = await setup('live');

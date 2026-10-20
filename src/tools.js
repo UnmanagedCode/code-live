@@ -4,6 +4,8 @@
 // callTool never throws; every failure is an {ok:false, code} result that
 // Gemini reads back to the user.
 
+import { parseMessageKey } from './eventMessages.js';
+
 const SESSION_PARAM = { type: 'STRING', description: "The conductor's session id, from its CONDUCTOR UPDATE or list_conductor_sessions, or its exact title." };
 
 export const DECLARATIONS = [
@@ -31,12 +33,15 @@ export const DECLARATIONS = [
   },
   {
     name: 'read_conductor_messages',
-    description: "Read a conductor session's most recent assistant messages, including any plan or questions it is waiting on (questionCount, hasPlan, planPath). Never starts announcing it.",
+    description: "Read a conductor's recent messages, or one message whole. Without messageKey: the latest message together with the plan or questions its turn ended on (or `count` messages; `before` a messageKey reads the ones before it), each cut to a few thousand characters and marked `truncated` when cut. With messageKey (from a listing or an update): that message's full text, one part at a time; read parts 1 up to `parts`. A result with `inProgress` is a message the conductor is still writing: tell the user it is not final. Never starts announcing it.",
     parameters: {
       type: 'OBJECT',
       properties: {
         session: SESSION_PARAM,
         count: { type: 'INTEGER', description: 'Exactly how many recent messages to return, 1–10. Omit it to get the latest message together with the plan or questions its turn ended on.' },
+        before: { type: 'STRING', description: 'A messageKey: read the messages before it (the nextBefore of a listing).' },
+        messageKey: { type: 'STRING', description: "A message's messageKey, to read that message whole. Not together with count or before." },
+        part: { type: 'INTEGER', description: 'With messageKey: which part to read, from 1. Omit it for part 1.' },
       },
       required: ['session'],
     },
@@ -142,12 +147,25 @@ const HANDLERS = {
     return service.send({ text: args.text, session: requiredSession(args) });
   },
   read_conductor_messages: (args, service) => {
+    const absent = (v) => v === undefined || v === null;
     let count;
-    if (args.count !== undefined && args.count !== null) {
+    if (!absent(args.count)) {
       if (!Number.isInteger(args.count) || args.count < 1 || args.count > 10) throw new ArgError('count must be an integer from 1 to 10');
       count = args.count;
     }
-    return service.read({ session: requiredSession(args), count });
+    const key = (name) => {
+      if (absent(args[name])) return undefined;
+      const parsed = parseMessageKey(args[name]);
+      if (!parsed) throw new ArgError(`${name} must be a messageKey as listed by read_conductor_messages`);
+      return parsed;
+    };
+    const messageKey = key('messageKey');
+    const before = key('before');
+    if (!absent(args.part) && !messageKey) throw new ArgError('part needs a messageKey');
+    if (messageKey && (count !== undefined || before)) throw new ArgError('messageKey cannot be combined with count or before');
+    if (!messageKey) return service.read({ session: requiredSession(args), count, before });
+    if (!absent(args.part) && (!Number.isInteger(args.part) || args.part < 1)) throw new ArgError('part must be an integer from 1');
+    return service.readMessage({ session: requiredSession(args), messageKey, part: absent(args.part) ? 1 : args.part });
   },
   answer_conductor_question: (args, service) => service.answer({ session: requiredSession(args), answers: answerEntries(args) }),
   approve_conductor_plan: (args, service) => {
