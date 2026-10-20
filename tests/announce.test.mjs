@@ -264,13 +264,46 @@ test('a turn ending on ExitPlanMode announces the plan with ask.planPath', async
   assert.deepEqual(inline.data.ask, { kind: 'plan', planPath: null });
 });
 
-// Invariant: a plan cut at the announcement cap is flagged on ask, never cut silently.
-test('a plan over 4000 chars is announced cut, with ask.truncated', async (t) => {
+// Invariant: a plan cut at the announcement cap is flagged planTruncated, never cut silently.
+test('a pending plan over MAX_TEXT is announced with planTruncated', async (t) => {
   const { host, sse } = await setup(t);
   host.finishAsk('cond-a', { kind: 'plan', plan: 'line\n'.repeat(2000), planPath: '/plans/big.md', prose: 'Big plan.' });
   const ev = await sse.next('announce');
-  assert.deepEqual(ev.data.ask, { kind: 'plan', planPath: '/plans/big.md', truncated: true });
+  assert.deepEqual(ev.data.ask, { kind: 'plan', planPath: '/plans/big.md' });
+  assert.equal(ev.data.planTruncated, true);
   assert.ok(ev.data.text.length <= 4000);
+});
+
+// Invariant: the flag does not depend on the plan being pending (auto-approved, or decided elsewhere).
+test('an auto-approved plan over MAX_TEXT is announced with planTruncated and no ask', async (t) => {
+  const { host, sse } = await setup(t);
+  host.finishAsk('cond-a', { kind: 'plan', plan: 'line\n'.repeat(2000), prose: 'Auto plan.', row: { awaitingUser: null, awaitingUserSource: null } });
+  const ev = await sse.next('announce');
+  assert.equal(ev.data.ask, null);
+  assert.equal(ev.data.planTruncated, true);
+  assert.ok(ev.data.text.length <= 4000);
+});
+
+// Invariant: the host's own planTruncated flag reaches the announcement even when the body is short.
+test("the host's planTruncated flag on a short body is announced as planTruncated", async (t) => {
+  const { host, sse } = await setup(t);
+  host.setMcp('get_recent_messages', () => ({ content: [
+    { type: 'text', text: JSON.stringify({ messages: [{ msgId: 'm1', hasPlan: true, planTruncated: true }] }) },
+    { type: 'text', text: '--- plan ---\nshortened by the host' },
+  ] }));
+  host.finishTurn('cond-a', 'placeholder');
+  const ev = await sse.next('announce');
+  assert.equal(ev.data.planTruncated, true);
+  assert.ok(ev.data.text.length < 4000);
+});
+
+// Invariant: a short plan, and a long reply with no plan, are not flagged.
+test('no planTruncated for a short plan or a long plan-free reply', async (t) => {
+  const { host, sse } = await setup(t);
+  host.finishAsk('cond-a', { kind: 'plan', plan: 'Step 1', prose: 'Short.' });
+  assert.equal('planTruncated' in (await sse.next('announce')).data, false);
+  host.finishTurn('cond-a', 'word '.repeat(2000));
+  assert.equal('planTruncated' in (await sse.next('announce', (d) => d.text.startsWith('word'))).data, false);
 });
 
 test('no ask is reported when the row shows no unanswered tool ask (auto-approved, answered, or prose-only)', async (t) => {

@@ -69,7 +69,7 @@ Gemini calls `list_conductor_sessions` and `read_conductor_messages` to answer y
 | `create_conductor_session` | starts a new conductor and announces its replies from then on. It takes no prompt: Gemini follows up with `send_to_conductor` using the returned session id |
 | `send_to_conductor` | sends your words to the named conductor and announces its replies from then on. The reply comes later as an announcement |
 | `read_conductor_messages` | reads back the latest assistant message of the named session together with the plan or questions its turn ended on. With a `count` (1–10) it reads back exactly that many messages. It never starts announcing the session |
-| `read_conductor_plan` | reads the whole plan of the named session, in parts (`PLAN_PART_CHARS` in `src/hostEvents.js`); Gemini reads every part before summarizing it. It never starts announcing the session |
+| `read_conductor_plan` | reads the whole of the named session's newest plan (pending or not), in parts (`PLAN_PART_CHARS` in `src/hostEvents.js`); Gemini reads every part before summarizing it. It never starts announcing the session |
 | `answer_conductor_question` | answers the questions the named conductor is waiting on |
 | `approve_conductor_plan` | approves the plan the named conductor is waiting on, after a spoken yes |
 | `reject_conductor_plan` | rejects that plan, with feedback, so the conductor revises it |

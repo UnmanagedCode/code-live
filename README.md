@@ -65,7 +65,7 @@ The catalog, per-model settings and the picker hints (the `hint` field) live in 
 | `create_conductor_session` | none | ensures `.conduct` and spawns a conductor, then announces its replies |
 | `send_to_conductor` | `session` (id or exact title), `text` | prompts that conductor over the host `/ws` and announces its replies |
 | `read_conductor_messages` | `session`, optional `count` (1–10) | the latest assistant message with the plan or questions its turn ended on (`hasPlan`, `planPath`, `questionCount`, `planTruncated` when the plan is cut); an explicit `count` returns exactly that many messages instead. Never starts announcing it |
-| `read_conductor_plan` | `session`, optional `part` (from 1) | the whole plan of the conductor's latest plan, in parts of `PLAN_PART_CHARS` (`src/hostEvents.js`), read from the `plan_request` event over REST. Never starts announcing it |
+| `read_conductor_plan` | `session`, optional `part` (from 1) | the whole of the conductor's newest plan (pending or not), in parts of `PLAN_PART_CHARS` (`src/hostEvents.js`), read from the `plan_request` event over REST. Never starts announcing it |
 | `answer_conductor_question` | `session`, `answers` (one `{choices?, text?, note?}` per question, in order) | answers the named conductor's pending question; choices are option numbers or words, mapped to the exact option labels |
 | `approve_conductor_plan` | `session`, `confirmed` (must be `true`), optional `feedback` | approves the named conductor's pending plan, which switches it to `bypassPermissions` |
 | `reject_conductor_plan` | `session`, optional `feedback` | rejects the named conductor's pending plan; the conductor stays in plan mode and revises it |

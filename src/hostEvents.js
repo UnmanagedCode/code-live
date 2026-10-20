@@ -64,14 +64,18 @@ export function truncateBody(text, max) {
 // Splits a plan into parts of at most `size` chars whose concatenation is
 // exactly `text`. A part breaks after a newline when one lies in the back half
 // of its window, so parts read back as the plan's own lines; otherwise it is
-// cut at `size`. Each lastIndexOf scans at most one window: linear overall.
+// cut at `size`. The backward newline scan stops at the middle of its window
+// (a part is at least half of `size`, so the work per part is bounded by the
+// part's own length): linear in the text.
 export function planParts(text, size = PLAN_PART_CHARS) {
   const parts = [];
   let start = 0;
   while (start < text.length) {
     if (start + size >= text.length) { parts.push(text.slice(start)); break; }
-    const nl = text.lastIndexOf('\n', start + size - 1);
-    const end = nl >= start + size / 2 ? nl + 1 : start + size;
+    let end = start + size;
+    for (let i = start + size - 1; i >= start + size / 2; i--) {
+      if (text.charCodeAt(i) === 10) { end = i + 1; break; }
+    }
     parts.push(text.slice(start, end));
     start = end;
   }
@@ -180,6 +184,15 @@ export function latestAskEvent(events, kind) {
   for (let i = events.length - 1; i >= 0; i--) {
     const ev = events[i];
     if (ev.kind === want && isTopLevel(ev) && !ev.autoApproved && (kind !== 'question' || Array.isArray(ev.questions))) return ev;
+  }
+  return null;
+}
+
+// The newest top-level plan_request, auto-approved or not: the plan a
+// conductor most recently produced, whether or not it is still pending.
+export function latestPlanEvent(events) {
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].kind === 'plan_request' && isTopLevel(events[i])) return events[i];
   }
   return null;
 }

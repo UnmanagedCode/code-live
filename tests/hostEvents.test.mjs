@@ -3,7 +3,7 @@
 // tool-sourced question/plan, and a turn's msgId is scoped to that turn.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { truncateBody, toolAsk, lastAssistantMsgId, assistantText, newestTurnEnd, latestAskEvent, askTurnEnd, askId, renderQuestions, renderPlan } from '../src/hostEvents.js';
+import { truncateBody, toolAsk, lastAssistantMsgId, assistantText, newestTurnEnd, latestAskEvent, askTurnEnd, askId, renderQuestions, renderPlan, planParts, latestPlanEvent } from '../src/hostEvents.js';
 
 const QUESTIONS = '--- questions ---\n1. Pick one (multiSelect: false) · header: Pick\n   - Alpha: first\n   - Beta: second';
 
@@ -157,4 +157,23 @@ test('askTurnEnd is the first top-level turn_end after the ask; askId survives r
   assert.equal(askId(ask), 'tu-9');
   assert.equal(askId({ ...ask, _seq: 40 }), 'tu-9');
   assert.equal(askId({ kind: 'user_question', _seq: 7 }), 'user_question@7', 'without a tool_use id the position stands in');
+});
+
+// Invariant (break policy): a part ends right after the last newline in the back half of its window; with none
+// there it is hard-cut at the size. Fails for "always hard-cut" and for "break at any newline in the window".
+test('planParts breaks after a newline in the back half of the window, else hard-cuts', () => {
+  const back = 'ab\ncdef\nghijklmnopqrstu'; // newlines at 2 and 7: only 7 is in [5, 10)
+  assert.deepEqual(planParts(back, 10), ['ab\ncdef\n', 'ghijklmnop', 'qrstu']);
+  const front = 'abc\ndefghijklmnopqrstu'; // the only newline is at 3, in the front half
+  assert.deepEqual(planParts(front, 10), ['abc\ndefghi', 'jklmnopqrs', 'tu']);
+  for (const t of [back, front, '', 'x', '\n'.repeat(25)]) assert.equal(planParts(t, 10).join(''), t);
+  assert.deepEqual(planParts('', 10), []);
+});
+
+// Invariant: latestPlanEvent returns the newest top-level plan_request even when auto-approved; sub-agent plans are skipped.
+test('latestPlanEvent returns the newest top-level plan, auto-approved or not', () => {
+  const ev = (seq, extra) => ({ kind: 'plan_request', _seq: seq, plan: `p${seq}`, ...extra });
+  assert.equal(latestPlanEvent([ev(1), ev(2, { autoApproved: true })])._seq, 2);
+  assert.equal(latestPlanEvent([ev(1), ev(2, { parentToolUseId: 'sub' })])._seq, 1);
+  assert.equal(latestPlanEvent([{ kind: 'turn_end', _seq: 1 }]), null);
 });

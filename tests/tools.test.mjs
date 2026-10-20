@@ -20,11 +20,11 @@ async function setup(t, { instances = [CONDUCTOR_A, CONDUCTOR_B, WORKER], events
 const text = (t) => ({ kind: 'assistant_message', message: { content: [{ type: 'text', text: t }] } });
 const toolOnly = { kind: 'assistant_message', message: { content: [{ type: 'tool_use', id: 'x', name: 'Bash', input: {} }] } };
 
-const FIVE = ['send_to_conductor', 'read_conductor_messages', 'read_conductor_plan', 'answer_conductor_question', 'approve_conductor_plan', 'reject_conductor_plan'];
+const CONDUCTOR_TOOLS = ['send_to_conductor', 'read_conductor_messages', 'read_conductor_plan', 'answer_conductor_question', 'approve_conductor_plan', 'reject_conductor_plan'];
 
 test('every tool that acts on a conductor declares session as a required string', () => {
   const byName = Object.fromEntries(DECLARATIONS.map((d) => [d.name, d.parameters]));
-  for (const name of FIVE) {
+  for (const name of CONDUCTOR_TOOLS) {
     assert.ok(byName[name].required.includes('session'), `${name} requires session`);
     assert.equal(byName[name].properties.session.type, 'STRING', name);
   }
@@ -120,7 +120,7 @@ test('read returns the last N text messages and never starts announcing', async 
 test('worker sessions are refused everywhere', async (t) => {
   const { host, app } = await setup(t);
   host.setRow('worker-1', { awaitingUser: 'plan', awaitingUserSource: 'tool' });
-  for (const name of FIVE) {
+  for (const name of CONDUCTOR_TOOLS) {
     const r = await callTool(app, name, { session: 'worker-1', text: 'x', confirmed: true, answers: [{ choices: ['1'] }] });
     assert.deepEqual([r.ok, r.code], [false, 'NOT_A_CONDUCTOR'], name);
   }
@@ -137,7 +137,7 @@ test('session resolution errors', async (t) => {
   const dup = { ...CONDUCTOR_B, id: 'cond-c', title: 'Alpha plan' };
   const { host, app } = await setup(t, { instances: [CONDUCTOR_A, dup, WORKER] });
   host.requests.length = 0;
-  for (const name of FIVE) {
+  for (const name of CONDUCTOR_TOOLS) {
     for (const session of [undefined, null, '', '   ']) {
       const r = await callTool(app, name, { text: 'x', confirmed: true, answers: [], ...(session === undefined ? {} : { session }) });
       assert.deepEqual([r.ok, r.code], [false, 'INVALID_ARGS'], `${name} ${JSON.stringify(session)}`);
@@ -146,7 +146,7 @@ test('session resolution errors', async (t) => {
     assert.equal((await callTool(app, name, { text: 'x', confirmed: true, answers: [], session: 5 })).message, 'session must be a string');
   }
   assert.equal(host.requests.length, 0, 'no host request for a missing session');
-  for (const name of FIVE) {
+  for (const name of CONDUCTOR_TOOLS) {
     const args = { text: 'x', confirmed: true, answers: [{ choices: ['1'] }] };
     const unknown = await callTool(app, name, { ...args, session: 'nope' });
     assert.equal(unknown.code, 'UNKNOWN_SESSION', name);
@@ -502,8 +502,8 @@ async function readAllParts(app, session = 'cond-a') {
   return results;
 }
 
-// Invariant: a plan over the 4000-char read cap is reachable whole through the tool, part by part, over REST only.
-test('read_conductor_plan returns a plan over the old 4000-char cap whole, part by part', async (t) => {
+// Invariant: a plan over MAX_TEXT is reachable whole through the tool, part by part, over REST only.
+test('read_conductor_plan returns a plan over MAX_TEXT whole, part by part', async (t) => {
   const { host, app } = await setup(t);
   host.finishAsk('cond-a', { kind: 'plan', plan: BIG_PLAN, planPath: '/plans/p.md', frames: false });
   const results = await readAllParts(app);
@@ -515,6 +515,29 @@ test('read_conductor_plan returns a plan over the old 4000-char cap whole, part 
   });
   assert.equal(host.mcpCalls.length, 0, 'the plan comes from the events route, not /mcp');
   assert.deepEqual(app.deps.state.get().watched, {}, 'reading never starts announcing');
+});
+
+// Invariant: read_conductor_plan returns the newest top-level plan, auto-approved or not, never an older one;
+// awaitingApproval reports pending-ness separately.
+test('read_conductor_plan reads an auto-approved plan newer than an earlier pending one', async (t) => {
+  const { host, app } = await setup(t);
+  host.finishAsk('cond-a', { kind: 'plan', plan: 'OLD plan', frames: false });
+  host.finishAsk('cond-a', { kind: 'plan', plan: BIG_PLAN, frames: false, row: { awaitingUser: null, awaitingUserSource: null } });
+  const results = await readAllParts(app);
+  assert.equal(results.map((r) => r.text).join(''), BIG_PLAN);
+  assert.equal(results[0].awaitingApproval, false);
+});
+
+// Invariant: a message over MAX_TEXT that holds no plan is never flagged planTruncated.
+test('a long message without a plan carries no planTruncated', async (t) => {
+  const { host, app } = await setup(t);
+  host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, prose: 'word '.repeat(2000), frames: false });
+  const [q] = (await callTool(app, 'read_conductor_messages', { session: 'cond-a' })).messages;
+  assert.equal('planTruncated' in q, false, 'prose plus questions');
+  host.finishTurn('cond-a', 'word '.repeat(2000));
+  const [p] = (await callTool(app, 'read_conductor_messages', { session: 'cond-a' })).messages;
+  assert.ok(p.text.length <= 4000);
+  assert.equal('planTruncated' in p, false, 'prose only');
 });
 
 // Invariant: the hard-cut path (no newline in reach) still loses nothing.
@@ -548,7 +571,7 @@ test('read_conductor_plan refuses a bad part and a missing plan', async (t) => {
   assert.deepEqual(app.deps.state.get().watched, {});
 });
 
-// Invariant: the 4000-char cut of a plan in a read is never silent; a short plan carries no flag.
+// Invariant: the MAX_TEXT cut of a plan in a read is never silent; a short plan carries no flag.
 test('a read of a plan over the cap flags planTruncated; a short plan does not', async (t) => {
   const { host, app } = await setup(t);
   host.finishAsk('cond-a', { kind: 'plan', plan: BIG_PLAN, planPath: '/plans/p.md', frames: false });

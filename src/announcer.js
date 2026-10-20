@@ -101,36 +101,41 @@ export function createAnnouncer({ api, link, state, publish, hostMcp }) {
     return messages;
   }
 
-  // The text and ask of one announcement. `pending` is the unannounced ask
-  // that ended this turn; its content is added from its own event unless the
-  // host's messages already carry it.
+  // The text, ask and planCut of one announcement. `pending` is the unannounced
+  // ask that ended this turn; its content is added from its own event unless the
+  // host's messages already carry it. `planCut` is true when the text carries a
+  // plan that is cut (by the host, or by MAX_TEXT) whether or not the plan is
+  // pending: an auto-approved or already-decided plan is cut the same way.
   async function compose({ row, events, turnEnd, msgId, pending, useMcp }) {
     const messages = useMcp ? await recentFor(row, msgId) : null;
     let text = messages ? messages.map((m) => m.text).filter(Boolean).join('\n') : eventsText(events, turnEnd);
-    if (!pending) return { text, ask: null };
+    let planIn = !!messages?.some((m) => m.hasPlan);
+    let hostCut = !!messages?.some((m) => m.hasPlan && m.planTruncated);
+    let ask = null;
     const add = (section) => { text = [text, section].filter(Boolean).join('\n'); };
-    if (pending.kind === 'question') {
+    if (pending?.kind === 'question') {
       const carried = messages?.findLast((m) => m.questionCount);
       if (!carried) add(renderQuestions(pending.ev.questions));
-      return { text, ask: { kind: 'question', count: carried ? carried.questionCount : pending.ev.questions.length } };
+      ask = { kind: 'question', count: carried ? carried.questionCount : pending.ev.questions.length };
+    } else if (pending) {
+      const carried = messages?.findLast((m) => m.hasPlan);
+      if (!carried) { add(renderPlan(pending.ev)); planIn = true; }
+      const planPath = carried ? carried.planPath : pending.ev.planPath;
+      ask = { kind: 'plan', planPath: typeof planPath === 'string' ? planPath : null };
     }
-    const carried = messages?.findLast((m) => m.hasPlan);
-    if (!carried) add(renderPlan(pending.ev));
-    const planPath = carried ? carried.planPath : pending.ev.planPath;
-    return { text, ask: { kind: 'plan', planPath: typeof planPath === 'string' ? planPath : null, ...(carried?.planTruncated ? { truncated: true } : {}) } };
+    return { text, ask, planCut: planIn && (hostCut || text.length > MAX_TEXT) };
   }
 
-  function emit(id, row, turnEnd, { text, ask }) {
+  function emit(id, row, turnEnd, { text, ask, planCut }) {
     const fitted = text ? truncateBody(text, MAX_TEXT) : null;
-    // A plan is cut from the end without `fitted.cut`, so it is flagged by length.
-    const cutPlan = ask?.kind === 'plan' && !!text && text.length > MAX_TEXT;
     publish('announce', {
       sessionId: id,
       title: summarize(row).title,
       text: fitted ? fitted.text : NO_TEXT,
       turnSeq: turnEnd._seq,
       isError: !!turnEnd.isError,
-      ask: ask && (fitted?.cut || cutPlan) ? { ...ask, truncated: true, ...(fitted.dropped ? { dropped: true } : {}) } : ask,
+      ask: ask && ask.kind === 'question' && fitted?.cut ? { ...ask, truncated: true, ...(fitted.dropped ? { dropped: true } : {}) } : ask,
+      ...(planCut ? { planTruncated: true } : {}),
     });
   }
 

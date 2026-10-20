@@ -77,13 +77,15 @@ test('a plan announce ends with the AWAITING PLAN APPROVAL line, with the plan f
   assert.deepEqual(entries().map((e) => e.label), ['Conductor · Alpha · plan', 'Conductor · Alpha · plan']);
 });
 
-// Invariant: a cut plan's footer sends Gemini to read_conductor_plan for that session; an uncut one does not.
-test("a cut plan's footer points to read_conductor_plan with its session", async () => {
+// Invariant: a cut plan's update sends Gemini to read_conductor_plan for that session, pending or not; an uncut one does not.
+test("a cut plan's update points to read_conductor_plan with its session", async () => {
   const { es, sent } = await setup('live');
-  es.emit('announce', { sessionId: 'c', title: 'Alpha', text: 'cut plan', ask: { kind: 'plan', planPath: null, truncated: true } });
+  es.emit('announce', { sessionId: 'c', title: 'Alpha', text: 'cut plan', ask: { kind: 'plan', planPath: null }, planTruncated: true });
+  es.emit('announce', { sessionId: 'c', title: 'Alpha', text: 'decided plan', ask: null, planTruncated: true });
   es.emit('announce', { sessionId: 'c', title: 'Alpha', text: 'whole plan', ask: { kind: 'plan', planPath: null } });
-  assert.ok(sent[0].includes('read_conductor_plan with session c'));
-  assert.ok(!sent[1].includes('read_conductor_plan'));
+  assert.ok(sent[0].includes('AWAITING PLAN APPROVAL') && sent[0].includes('read_conductor_plan with session c'));
+  assert.ok(sent[1].includes('read_conductor_plan with session c') && !sent[1].includes('AWAITING'));
+  assert.ok(!sent[2].includes('read_conductor_plan'));
 });
 
 test('an announce without an ask has no footer and no label suffix', async () => {

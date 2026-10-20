@@ -43,7 +43,7 @@ export const DECLARATIONS = [
   },
   {
     name: 'read_conductor_plan',
-    description: 'Read the whole plan a conductor is waiting on (or its latest plan), in parts. A long plan comes in several parts (`parts`): read every part, from 1 up to `parts`, before you summarize the plan or the user decides on it. Never starts announcing it.',
+    description: "Read the whole of a conductor's newest plan (the one it is waiting on, if it is waiting), in parts. A long plan comes in several parts (`parts`): read every part, from 1 up to `parts`, before you summarize the plan or the user decides on it. Never starts announcing it.",
     parameters: {
       type: 'OBJECT',
       properties: {

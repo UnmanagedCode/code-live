@@ -23,6 +23,9 @@ const readsAsMarker = (line) => MARKER.test(line.normalize('NFKD').replace(COMBI
 // split() with a capture group alternates lines and the breaks between them.
 const safeBody = (text) => String(text).split(BREAK_SPLIT).map((part, i) => (i % 2 === 0 && readsAsMarker(part) ? `> ${part}` : part)).join('');
 
+// The line that ends an update whose plan is cut, pending or not.
+const planCutLine = (sessionId) => `The plan above is cut short: call read_conductor_plan with session ${sessionId} and read every part before summarizing it.`;
+
 // The line that ends an update whose turn stopped on a question or plan.
 function askFooter(ask, sessionId) {
   if (ask?.kind === 'question') {
@@ -31,10 +34,7 @@ function askFooter(ask, sessionId) {
     else if (ask.truncated) cut = ' Some options above were shortened: say so, and let the user pick by option number.';
     return `${ASK_QUESTION_MARK}: ${ask.count} question(s). Use answer_conductor_question with session ${sessionId}.${cut}`;
   }
-  if (ask?.kind === 'plan') {
-    const cut = ask.truncated ? ` The plan above is cut short: call read_conductor_plan with session ${sessionId} and read every part before summarizing it.` : '';
-    return `${ASK_PLAN_MARK}${ask.planPath ? ` (plan file: ${oneLine(ask.planPath)})` : ''}. Use approve_conductor_plan or reject_conductor_plan with session ${sessionId}.${cut}`;
-  }
+  if (ask?.kind === 'plan') return `${ASK_PLAN_MARK}${ask.planPath ? ` (plan file: ${oneLine(ask.planPath)})` : ''}. Use approve_conductor_plan or reject_conductor_plan with session ${sessionId}.`;
   return '';
 }
 
@@ -48,7 +48,7 @@ export function installAnnouncements({ eventSource, transcript, session, hostInd
     if (!a) return;
     transcript.add('conductor', a.text, { title: a.title, ...(a.ask?.kind ? { ask: a.ask.kind } : {}) });
     const sessionId = oneLine(a.sessionId);
-    const footer = askFooter(a.ask, sessionId);
+    const footer = [askFooter(a.ask, sessionId), a.planTruncated ? planCutLine(sessionId) : ''].filter(Boolean).join('\n');
     if (session.state === 'live') session.sendText(`${ANNOUNCE_PREFIX} from "${safeTitle(a.title)}" (session ${sessionId}):\n${safeBody(a.text)}${footer ? `\n${footer}` : ''}`);
   });
   eventSource.addEventListener('host', (ev) => {

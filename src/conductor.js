@@ -2,7 +2,7 @@
 // conductor and resolves it against conductor rows only, so a worker session
 // can never be listed, read, prompted, answered or decided. Acting on a
 // conductor (create, send, answer, approve, reject) starts announcing it.
-import { assistantText, isConductor, latestAskEvent, planParts, summarize, toolAsk, truncate, truncateBody, MAX_TEXT } from './hostEvents.js';
+import { assistantText, isConductor, latestAskEvent, latestPlanEvent, planParts, summarize, toolAsk, truncate, truncateBody, MAX_TEXT } from './hostEvents.js';
 import { pairMessages } from './hostMcp.js';
 import { describeAnswers, resolveAnswers, remapQuestion } from './answerMapping.js';
 
@@ -185,12 +185,12 @@ export function createConductorService({ api, link, announcer, hostMcp }) {
       return { ok: true, sessionId: row.id, title: summarize(row).title, messages: await readMessages(row, count) };
     },
 
-    // The whole plan of the conductor's latest plan_request, one part at a
+    // The whole plan of the conductor's newest plan_request (pending or not), one part at a
     // time, from the events route: the host's message bodies cap a plan.
     async readPlan({ session, part }) {
       const row = await resolve(session);
       const title = summarize(row).title;
-      const ev = latestAskEvent(await eventsOf(row.id), 'plan');
+      const ev = latestPlanEvent(await eventsOf(row.id));
       if (!ev) throw fail('NO_PLAN', `"${title}" has no plan in its recent events.`);
       const planPath = typeof ev.planPath === 'string' && ev.planPath ? ev.planPath : null;
       if (typeof ev.plan !== 'string' || ev.plan === '') {

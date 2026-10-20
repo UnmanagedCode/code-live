@@ -25,6 +25,8 @@ import { tempDir, SENTINEL_KEY } from './helpers.mjs';
 
 const SIZES = [10_000, 20_000, 40_000, 80_000];
 const BODY_SIZES = [8_192, 16_384, 32_768, 65_536]; // readJsonBody refuses more than 64 KB
+// planParts is under a millisecond at SIZES, so a quadratic scan only shows at plan-sized inputs.
+const PLAN_SIZES = [1_000_000, 2_000_000, 4_000_000];
 const LIMIT_MS = 250;
 const MEASURABLE_MS = 5;
 const MAX_RATIO = 3; // a quadratic grows about 4x per doubling
@@ -132,7 +134,7 @@ test('host events: reply truncation, rendering and text extraction', async () =>
     'all newlines': (n) => '\n'.repeat(n),
     'newline every ~100 chars': (n) => `${'x'.repeat(99)}\n`.repeat(n / 100),
   };
-  for (const [name, make] of Object.entries(planShapes)) await assertLinear(`planParts ${name}`, make, (s) => planParts(s));
+  for (const [name, make] of Object.entries(planShapes)) await assertLinear(`planParts ${name}`, make, (s) => planParts(s), PLAN_SIZES);
   await assertLinear('truncate', (n) => 'x'.repeat(n), (s) => truncate(s, MAX_TEXT));
   await assertLinear('renderQuestions', (n) => Array.from({ length: n / 20 }, (_, i) => ({ question: `q${i}`, header: 'h', options: [{ label: 'l', description: 'd' }] })), renderQuestions);
   await assertLinear('renderPlan', (n) => ({ planPath: 'p'.repeat(n), plan: 'x\n'.repeat(n) }), renderPlan);
