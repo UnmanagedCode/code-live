@@ -353,6 +353,36 @@ test('a cut turn window with no whole message is announced truncated with no mes
   assert.deepEqual(ev.messageKeys, []);
 });
 
+// Invariant: a pending plan announced from a replayed ring (no message_start) carries its plan: the turn window that
+// reaches its start keeps the plan message, and one that does not is marked cut with the plan rendered from its event.
+test('a pending plan on a ring without message_start is announced with its plan, or marked cut', async (t) => {
+  const { host, sse } = await setup(t);
+  host.finishTurn('cond-a', 'earlier turn');
+  await sse.next('announce');
+  host.finishAsk('cond-a', { kind: 'plan', plan: 'Step 1', prose: 'Plan message.', notify: false, frames: false });
+  host.resetRing('cond-a', { drop: (ev) => ev.kind === 'message_start' });
+  host.broadcast({ t: 'instances', instances: host.state.instances });
+  const whole = (await sse.next('announce')).data;
+  assert.equal(whole.text, 'Plan message.\n--- plan ---\nStep 1');
+  assert.equal('truncated' in whole, false);
+});
+
+// Invariant: when the turn window does not reach the turn's start on a ring without message_start, the pending plan is
+// still announced (rendered from its own event) and the announcement is marked cut, naming no key for the message the
+// seam may run through.
+test('a pending plan whose turn window is cut on a replayed ring is announced with its plan and marked cut', async (t) => {
+  const { host, sse } = await setup(t);
+  for (let i = 0; i < 5000; i++) host.addEvent('cond-a', { kind: 'tool_use', name: 'Bash', input: {} });
+  host.finishAsk('cond-a', { kind: 'plan', plan: 'Step 2', prose: 'Second plan.', notify: false, frames: false });
+  host.resetRing('cond-a', { drop: (ev) => ev.kind === 'message_start' });
+  host.broadcast({ t: 'instances', instances: host.state.instances });
+  const cut = (await sse.next('announce')).data;
+  assert.equal(cut.ask.kind, 'plan');
+  assert.ok(cut.text.endsWith('--- plan ---\nStep 2'), cut.text);
+  assert.equal(cut.truncated, true);
+  assert.deepEqual(cut.messageKeys, []);
+});
+
 // Invariant: a short plan and a short reply carry neither truncated nor messageKeys.
 test('a short announcement carries no truncated and no messageKeys', async (t) => {
   const { host, sse } = await setup(t);

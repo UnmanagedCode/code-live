@@ -156,12 +156,17 @@ export function createConductorService({ api, link, announcer, hostMcp }) {
   // Whether a window holds what the request needs: `want` whole messages (the
   // oldest is not counted while the window may start inside it), and for the
   // default selection its turn's start too, or an ask already bonded.
+  // A left-out oldest message of the last message's own turn may be the plan or
+  // questions it bonds to (on a replayed ring, where no message opens, the oldest
+  // message is always left out), so the read goes on until it is no longer oldest.
+  const sameTurnPartial = (partial, last) => !!partial && !!last && partial.turn === last.turn;
   const enoughFor = (want, byTurn) => (events) => {
-    const { messages } = wholeMessages(events, false);
+    const { messages, partial } = wholeMessages(events, false);
     if (messages.length < want) return false;
     if (!byTurn) return true;
     const last = messages.at(-1);
-    return bondedSelection(messages).length > 1 || !!last.questions || last.hasPlan || reachesTurnStart(events, last);
+    if (bondedSelection(messages).length > 1 || last.questions || last.hasPlan) return true;
+    return !sameTurnPartial(partial, last) && reachesTurnStart(events, last);
   };
 
   // The message listing. A message the window may start inside is never listed
@@ -181,8 +186,10 @@ export function createConductorService({ api, link, announcer, hostMcp }) {
     const start = picked.length ? messages.indexOf(picked[0]) : 0;
     const items = picked.map(listed);
     // The default selection is bonded to its turn: without the turn's start in
-    // the window, an older plan or question of the turn may be missing.
-    const turnOpen = byTurn && !complete && !reachesTurnStart(events, messages.at(-1)) && picked.length === 1 && !picked[0].hasPlan && !picked[0].questions;
+    // the window, or with a left-out message of the turn, an older plan or
+    // question of the turn may be missing.
+    const turnOpen = byTurn && !complete && picked.length === 1 && !picked[0].hasPlan && !picked[0].questions
+      && (sameTurnPartial(partial, messages.at(-1)) || !reachesTurnStart(events, messages.at(-1)));
     const hints = [...(items.some((m) => m.truncated) ? [CUT_HINT] : []), ...(turnOpen ? [TURN_HINT] : [])];
     return {
       messages: items,

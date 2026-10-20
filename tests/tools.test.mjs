@@ -718,6 +718,45 @@ test('a page that begins on a block opener of a message lists and reads that mes
   assert.deepEqual([forged.ok, forged.code], [false, 'MESSAGE_NOT_FOUND']);
 });
 
+// Invariant: on a ring with no message_start (after a resume, respawn or rewind the host replays history without it),
+// the default read still returns the turn's plan message bonded with its trailing prose: a left-out oldest message of
+// the last message's turn is read past, not mistaken for the end of the bond.
+test('the default read keeps the bonded plan on a ring without message_start', async (t) => {
+  const { host, app } = await setup(t);
+  noise(host, 99);
+  host.addEvent('cond-a', { kind: 'turn_end' });
+  host.addEvent('cond-a', { kind: 'message_start', msgId: 'plan-msg' });
+  host.addEvent('cond-a', { kind: 'text_delta', msgId: 'plan-msg', blockIdx: 0, text: 'Plan message.' });
+  host.addEvent('cond-a', { kind: 'tool_use', msgId: 'plan-msg', blockIdx: 1, toolUseId: 'tuP', name: 'ExitPlanMode', input: { plan: 'Step 1' } });
+  host.addEvent('cond-a', { kind: 'plan_request', toolUseId: 'tuP', plan: 'Step 1', planPath: null });
+  host.addEvent('cond-a', { kind: 'message_start', msgId: 'prose-msg' });
+  host.addEvent('cond-a', { kind: 'text_delta', msgId: 'prose-msg', blockIdx: 0, text: 'Waiting for approval.' });
+  host.addEvent('cond-a', { kind: 'turn_end' });
+  noise(host, 441);
+  host.resetRing('cond-a', { drop: (ev) => ev.kind === 'message_start' });
+  const r = await callTool(app, 'read_conductor_messages', { session: 'cond-a' });
+  assert.deepEqual(r.messages.map((m) => [m.hasPlan ?? false, m.text]), [[true, 'Plan message.\n--- plan ---\nStep 1'], [false, 'Waiting for approval.']]);
+  assert.equal('hint' in r, false);
+});
+
+// Invariant: when the bound stops a default read before a replayed ring's plan message can be kept, the result says
+// the turn's start is out of reach instead of presenting the trailing prose as the whole bond.
+test('a default read that cannot reach the bonded plan on a replayed ring carries the turn hint', async (t) => {
+  const { host, app } = await setup(t);
+  host.addEvent('cond-a', { kind: 'turn_end' });
+  host.addEvent('cond-a', { kind: 'text_delta', msgId: 'plan-msg', blockIdx: 0, text: 'Plan message.' });
+  host.addEvent('cond-a', { kind: 'tool_use', msgId: 'plan-msg', blockIdx: 1, toolUseId: 'tuP', name: 'ExitPlanMode', input: { plan: 'Step 1' } });
+  host.addEvent('cond-a', { kind: 'plan_request', toolUseId: 'tuP', plan: 'Step 1', planPath: null });
+  noise(host, 32_000);
+  host.addEvent('cond-a', { kind: 'text_delta', msgId: 'mid-msg', blockIdx: 0, text: 'Narration between.' });
+  noise(host, 50);
+  host.addEvent('cond-a', { kind: 'text_delta', msgId: 'prose-msg', blockIdx: 0, text: 'Waiting for approval.' });
+  const r = await callTool(app, 'read_conductor_messages', { session: 'cond-a' });
+  assert.deepEqual(r.messages.map((m) => m.text), ['Waiting for approval.']);
+  assert.match(r.hint, /start of this turn is further back/);
+  assert.ok(r.nextBefore);
+});
+
 // Invariant: a key never yields another message's text: an unknown key, and a key whose seq a respawn reassigned to a
 // different message, are both MESSAGE_NOT_FOUND.
 test('an unknown key and a renumbered key are MESSAGE_NOT_FOUND', async (t) => {
