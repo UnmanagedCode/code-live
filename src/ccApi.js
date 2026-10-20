@@ -38,8 +38,10 @@ export function createCcApi({ baseUrl, fetchImpl = fetch, timeoutMs = 5000 }) {
       await this.ensureConduct();
       return call('POST', '/api/instances', { project: '.conduct', role: 'conductor', temp: true, mode: 'bypassPermissions' });
     },
-    getEvents(id, { limit = 500 } = {}) {
-      return call('GET', `/api/instances/${encodeURIComponent(id)}/events?limit=${limit}`);
+    // A trailing page, or the one before `before` / after `after` (a _seq).
+    getEvents(id, { limit = 500, before, after } = {}) {
+      const cursor = (before !== undefined ? `&before=${before}` : '') + (after !== undefined ? `&after=${after}` : '');
+      return call('GET', `/api/instances/${encodeURIComponent(id)}/events?limit=${limit}${cursor}`);
     },
   };
 }
