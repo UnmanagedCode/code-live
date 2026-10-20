@@ -96,7 +96,9 @@ export function assembleMessages(events) {
       }
       continue;
     }
-    if (!MESSAGE_KINDS.has(ev.kind)) continue;
+    // Any event of a msgId (a block opener, a text_end, a usage record) joins its
+    // group, so a message's first seq is its first event of any kind; only the
+    // content kinds add to it.
     const msgId = str(ev.msgId) || (ev.kind === 'assistant_message' ? `m${ev._seq}` : '');
     if (!msgId) continue;
     let m = groups.get(msgId);
@@ -105,6 +107,7 @@ export function assembleMessages(events) {
       groups.set(msgId, m);
       ordered.push(m);
     }
+    if (!MESSAGE_KINDS.has(ev.kind)) continue;
     latest = m;
     if (ev.kind === 'message_start') m.opened = true;
     if (ev.kind === 'text_delta') {
@@ -127,16 +130,16 @@ export function assembleMessages(events) {
 }
 
 // The messages of a window of events that is cut at its old end (`complete`
-// false: the host has older events). The oldest message is left out when the
-// window may start inside it: its first event is the window's first and is not
-// a message_start, so earlier events of it may lie below. A message that began
-// inside the window is whole. Returns `{messages, partial}`, `partial` being the
-// message left out, or null.
+// false: the host has older events). Only a message whose message_start is in
+// the window provably started there, so the oldest message is left out unless it
+// did: the window may begin inside it, on any of its events. (Events replayed
+// from disk carry no message_start, so their oldest message is left out until the
+// read has gone back to the beginning.) Returns `{messages, partial}`, `partial`
+// being the message left out, or null.
 export function wholeMessages(events, complete) {
   const messages = assembleMessages(events);
   const first = messages[0];
   if (complete || !first || first.opened) return { messages, partial: null };
-  if (first.firstSeq !== events.find(hasSeq)?._seq) return { messages, partial: null };
   return { messages: messages.slice(1), partial: first };
 }
 

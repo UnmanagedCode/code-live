@@ -103,17 +103,32 @@ test('parseMessageKey accepts <seq>-<msgId> and nothing else', () => {
   }
 });
 
-// Invariant: a window cut at its old end leaves out the oldest message only when it may start below the window (its
-// first event is the window's first and is no message_start); a message that opened inside the window, or any message
-// in a window the host has nothing older than, is never left out.
-test('wholeMessages leaves out only a message the window may start inside', () => {
-  const cutInside = seq([delta('a', 0, 'tail of a'), { kind: 'message_start', msgId: 'b' }, delta('b', 0, 'whole b')]);
-  const openedFirst = seq([{ kind: 'message_start', msgId: 'a' }, delta('a', 0, 'whole a'), { kind: 'message_start', msgId: 'b' }, delta('b', 0, 'whole b')]);
-  const laterStart = seq([{ kind: 'tool_use', name: 'Bash' }, delta('a', 0, 'a starts after the first event')]);
-  assert.deepEqual(wholeMessages(cutInside, false).messages.map((m) => m.msgId), ['b']);
-  assert.equal(wholeMessages(cutInside, false).partial.msgId, 'a');
-  assert.deepEqual(wholeMessages(cutInside, true).messages.map((m) => m.msgId), ['a', 'b'], 'nothing older: the first message is whole');
-  assert.deepEqual(wholeMessages(openedFirst, false).messages.map((m) => m.msgId), ['a', 'b']);
-  assert.deepEqual(wholeMessages(laterStart, false).messages.map((m) => m.msgId), ['a']);
+// Invariant: in a window cut at its old end, the oldest message is left out unless its message_start is in the window,
+// whichever of its events the window begins on (a block opener, a text_end, a delta); a message that opened inside the
+// window, and any message in a window the host has nothing older than, is never left out.
+test('wholeMessages leaves out the oldest message unless the window holds its start', () => {
+  const second = [delta('a', 2, 'SECOND '), { kind: 'message_start', msgId: 'b' }, delta('b', 0, 'whole b')];
+  const seams = {
+    thinking_start: { kind: 'thinking_start', msgId: 'a', blockIdx: 1 },
+    tool_use_start: { kind: 'tool_use_start', msgId: 'a', blockIdx: 1 },
+    text_end: { kind: 'text_end', msgId: 'a', blockIdx: 0 },
+    text_delta: delta('a', 0, 'FIRST '),
+  };
+  for (const [name, seam] of Object.entries(seams)) {
+    const events = seq([seam, ...second]);
+    const { messages, partial } = wholeMessages(events, false);
+    assert.deepEqual(messages.map((m) => m.msgId), ['b'], name);
+    assert.equal(partial.msgId, 'a', name);
+    assert.deepEqual(wholeMessages(events, true).messages.map((m) => m.msgId), ['a', 'b'], `${name}: nothing older`);
+  }
+  const opened = seq([{ kind: 'message_start', msgId: 'a' }, delta('a', 0, 'whole a'), { kind: 'message_start', msgId: 'b' }, delta('b', 0, 'whole b')]);
+  assert.deepEqual(wholeMessages(opened, false).messages.map((m) => m.msgId), ['a', 'b']);
   assert.deepEqual(wholeMessages([], false), { messages: [], partial: null });
+});
+
+// Invariant: a message's first seq is its first event of any kind, so a window that begins on a non-content event of
+// a message (a block opener) starts that message there, not at its first delta.
+test('a message first seq is its first event of any kind', () => {
+  const [m] = assembleMessages(seq([{ kind: 'thinking_start', msgId: 'a', blockIdx: 1 }, delta('a', 2, 'text')]));
+  assert.deepEqual([m.firstSeq, m.key, m.opened], [1, '1-a', false]);
 });

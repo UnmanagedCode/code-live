@@ -33,7 +33,7 @@ export const DECLARATIONS = [
   },
   {
     name: 'read_conductor_messages',
-    description: "Read a conductor's recent messages, or one message whole. Without messageKey: the latest message together with the plan or questions its turn ended on (or `count` messages; `before` a messageKey reads the ones before it), each cut to a few thousand characters and marked `truncated` when cut. With messageKey (from a listing or an update): that message's full text, one part at a time; read parts 1 up to `parts`. Never starts announcing it.",
+    description: "Read a conductor's recent messages, or one message whole. Without messageKey: the latest message together with the plan or questions its turn ended on (or `count` messages; `before` a messageKey reads the ones before it), each cut to a few thousand characters and marked `truncated` when cut. With messageKey (from a listing or an update): that message's full text, one part at a time; read parts 1 up to `parts`. A result with `inProgress` is a message the conductor is still writing: tell the user it is not final. Never starts announcing it.",
     parameters: {
       type: 'OBJECT',
       properties: {

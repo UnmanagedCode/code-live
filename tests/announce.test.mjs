@@ -337,6 +337,22 @@ test('a turn window that misses the turn start is announced cut, with keys only 
   assert.equal((await callTool(app, 'read_conductor_messages', { session: 'cond-a', messageKey: ev.messageKeys[0] })).text, 'The closing words.');
 });
 
+// Invariant: a turn whose window misses its start and holds no whole message is still announced, marked cut, with no
+// key to hand out (never one for the message the seam runs through).
+test('a cut turn window with no whole message is announced truncated with no messageKeys', async (t) => {
+  const { host, sse } = await setup(t);
+  host.finishTurn('cond-a', 'earlier turn');
+  await sse.next('announce');
+  host.addEvent('cond-a', { kind: 'message_start', msgId: 'big' });
+  for (let i = 0; i < 4500; i++) host.addEvent('cond-a', { kind: 'text_delta', msgId: 'big', blockIdx: 0, text: 'word ' });
+  host.addEvent('cond-a', { kind: 'turn_end', isError: false });
+  host.broadcast({ t: 'turn_notification', id: 'cond-a', project: '.conduct', isError: false });
+  const ev = (await sse.next('announce')).data;
+  assert.equal(ev.text, '(turn finished with no text reply)');
+  assert.equal(ev.truncated, true);
+  assert.deepEqual(ev.messageKeys, []);
+});
+
 // Invariant: a short plan and a short reply carry neither truncated nor messageKeys.
 test('a short announcement carries no truncated and no messageKeys', async (t) => {
   const { host, sse } = await setup(t);

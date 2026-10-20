@@ -690,6 +690,34 @@ test('a key that lands inside its own renumbered message is MESSAGE_NOT_FOUND, n
   assert.equal(fresh.text, 'Hello beautiful world');
 });
 
+// Invariant: when the newest page begins on a block opener of a message (not its first event), the listing does not
+// present that message's tail as the whole: it reads back to the message's start, and the keyed read returns the same
+// whole body.
+test('a page that begins on a block opener of a message lists and reads that message whole', async (t) => {
+  const { host, app } = await setup(t);
+  host.addEvent('cond-a', { kind: 'turn_end' });
+  const start = host.addEvent('cond-a', { kind: 'message_start', msgId: 'm' });
+  host.addEvent('cond-a', { kind: 'text_delta', msgId: 'm', blockIdx: 0, text: 'FIRST ' });
+  host.addEvent('cond-a', { kind: 'text_end', msgId: 'm', blockIdx: 0 });
+  const seam = host.addEvent('cond-a', { kind: 'thinking_start', msgId: 'm', blockIdx: 1 });
+  host.addEvent('cond-a', { kind: 'thinking_delta', msgId: 'm', blockIdx: 1, text: 'Narrating.', narration: true });
+  host.addEvent('cond-a', { kind: 'text_delta', msgId: 'm', blockIdx: 2, text: 'SECOND ' });
+  host.addEvent('cond-a', { kind: 'tool_use', msgId: 'm', blockIdx: 3, toolUseId: 'tuP', name: 'ExitPlanMode', input: { plan: 'Step 1' } });
+  host.addEvent('cond-a', { kind: 'plan_request', toolUseId: 'tuP', plan: 'Step 1', planPath: null });
+  host.addEvent('cond-a', { kind: 'message_start', msgId: 'tail' });
+  const last = host.addEvent('cond-a', { kind: 'text_delta', msgId: 'tail', blockIdx: 0, text: 'Waiting for approval.' });
+  noise(host, seam._seq + 499 - last._seq);
+  assert.equal(host.state.events['cond-a'].at(-500)._seq, seam._seq, 'the newest page begins on the thinking_start');
+  const body = 'FIRST SECOND \n--- narration ---\nNarrating.\n--- plan ---\nStep 1';
+  const r = await callTool(app, 'read_conductor_messages', { session: 'cond-a' });
+  assert.deepEqual(r.messages.map((m) => [m.messageKey, m.text]), [[`${start._seq}-m`, body], [`${last._seq - 1}-tail`, 'Waiting for approval.']]);
+  const read = await callTool(app, 'read_conductor_messages', { session: 'cond-a', messageKey: `${start._seq}-m` });
+  assert.deepEqual([read.ok, read.text, read.totalChars], [true, body, body.length]);
+  // A key pointing at the first delta after the seam is a fragment, not the message.
+  const forged = await callTool(app, 'read_conductor_messages', { session: 'cond-a', messageKey: `${seam._seq + 2}-m` });
+  assert.deepEqual([forged.ok, forged.code], [false, 'MESSAGE_NOT_FOUND']);
+});
+
 // Invariant: a key never yields another message's text: an unknown key, and a key whose seq a respawn reassigned to a
 // different message, are both MESSAGE_NOT_FOUND.
 test('an unknown key and a renumbered key are MESSAGE_NOT_FOUND', async (t) => {

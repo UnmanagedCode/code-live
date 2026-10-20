@@ -95,6 +95,28 @@ test("a cut update's last line names read_conductor_messages, the session and ev
   assert.ok(!sent[2].includes('read_conductor_messages'));
 });
 
+// Invariant: a cut update with no key to name (empty or missing messageKeys) still ends with a line that tells Gemini
+// to read the newest messages with read_conductor_messages for that session; it names no key.
+test('a cut update without messageKeys ends with the generic read-newest line', async () => {
+  const { es, sent } = await setup('live');
+  es.emit('announce', { sessionId: 'c', title: 'Alpha', text: 'x', ask: null, truncated: true, messageKeys: [] });
+  es.emit('announce', { sessionId: 'c', title: 'Alpha', text: 'y', ask: null, truncated: true });
+  for (const text of sent) {
+    const last = text.split('\n').at(-1);
+    assert.match(last, /read_conductor_messages/);
+    assert.match(last, /session c/);
+    assert.doesNotMatch(last, /messageKey/);
+  }
+  assert.equal(sent.length, 2);
+});
+
+// Invariant: Gemini is told what inProgress means, in the tool's declaration and in the system prompt.
+test('the inProgress flag is explained in the declaration and the system prompt', () => {
+  const read = DECLARATIONS.find((d) => d.name === 'read_conductor_messages');
+  assert.match(read.description, /inProgress/);
+  assert.match(SYSTEM_PROMPT, /inProgress[^.]*still being written/);
+});
+
 // Invariant: a key from the wire cannot start a new line of the update (it stays inside the cut line).
 test('a message key with a line break stays on the cut line', async () => {
   const { es, sent } = await setup('live');
