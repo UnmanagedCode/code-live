@@ -63,7 +63,7 @@ Each frame is `id: <boot>-<n>` / `event: <name>` / `data: <json>`. `<boot>` is r
 | event | data | sent |
 |---|---|---|
 | `host` | `{connected:boolean}` | on connect (no id), and when the backend's host `/ws` link opens or closes |
-| `announce` | `{sessionId, title, text, turnSeq, isError, ask}` | when an announced conductor finishes a turn (`sessionId` names it). `text` is at most 4000 chars, or `(turn finished with no text reply)`. `ask` is `{kind:"question", count, truncated?, dropped?}` (AskUserQuestion pending; `text` holds the `--- questions ---` section; `truncated:true` means its lines were shortened to fit 4000 chars, and `dropped:true` that whole trailing lines (options, or questions) are missing and the last line says how many), `{kind:"plan", planPath:string\|null}` (ExitPlanMode pending), or `null` |
+| `announce` | `{sessionId, title, text, turnSeq, isError, ask}` | when an announced conductor finishes a turn (`sessionId` names it). `text` is at most 4000 chars, or `(turn finished with no text reply)`. `ask` is `{kind:"question", count, truncated?, dropped?}` (AskUserQuestion pending; `text` holds the `--- questions ---` section; `truncated:true` means its lines were shortened to fit 4000 chars, and `dropped:true` that whole trailing lines (options, or questions) are missing and the last line says how many), `{kind:"plan", planPath:string\|null, truncated?}` (ExitPlanMode pending; `truncated:true` means the plan in `text` is cut or the host shortened it), or `null` |
 
 - **Replay:** the backend keeps the last 20 id-bearing events.
   - A request with `Last-Event-ID` from this process gets every ring event after it.
@@ -82,6 +82,7 @@ The declarations are `DECLARATIONS` in `src/tools.js`, with parameter types in G
 | `create_conductor_session` | none |
 | `send_to_conductor` | `session` STRING (required), `text` STRING (required, non-empty) |
 | `read_conductor_messages` | `session` STRING (required), `count` INTEGER (optional, 1–10) |
+| `read_conductor_plan` | `session` STRING (required), `part` INTEGER (optional, from 1; omitted is 1; anything else is `INVALID_ARGS`) |
 | `answer_conductor_question` | `session` STRING (required), `answers` ARRAY (required) of OBJECT `{choices: ARRAY<STRING>, text: STRING, note: STRING}`; entry *n* answers question *n*. A choice is an option number or its words (numbers are also accepted) |
 | `approve_conductor_plan` | `session` STRING (required), `confirmed` BOOLEAN (required; must be `true`), `feedback` STRING (optional) |
 | `reject_conductor_plan` | `session` STRING (required), `feedback` STRING (optional) |
@@ -104,7 +105,8 @@ A session summary is `{sessionId, title, status, lastResponseAt}`. `status` is t
 | `list_conductor_sessions` | `{ok:true, sessions:[summary]}` |
 | `create_conductor_session` | `{ok:true, session:summary}` |
 | `send_to_conductor` | `{ok:true, sessionId, title, delivered:true, note:"The reply will be announced when the conductor finishes its turn."}` |
-| `read_conductor_messages` | `{ok:true, sessionId, title, messages:[{text, hasPlan?, planPath?, questionCount?}]}`: oldest first, each `text` ≤ 4000 chars. See [reading messages](#reading-messages) |
+| `read_conductor_messages` | `{ok:true, sessionId, title, messages:[{text, hasPlan?, planPath?, planTruncated?, questionCount?}]}`: oldest first, each `text` ≤ `MAX_TEXT` chars (`src/hostEvents.js`). See [reading messages](#reading-messages) |
+| `read_conductor_plan` | `{ok:true, sessionId, title, awaitingApproval, planPath:string\|null, part, parts, totalChars, text}`: `text` is part `part` of `parts`, each at most `PLAN_PART_CHARS` (`src/hostEvents.js`); the parts joined are the whole plan. See [reading a plan](#reading-a-plan) |
 | `answer_conductor_question` | `{ok:true, sessionId, title, delivered:true, answered:[{question, answer}], note}`; `question` is 1-based and `answer` is the label list or the free text that was sent |
 | `approve_conductor_plan` | `{ok:true, sessionId, title, mode, delivered:true, note}`; `mode` is the host's reported mode (`bypassPermissions`) |
 | `reject_conductor_plan` | same shape as approve; `mode` stays `plan` |
@@ -127,6 +129,8 @@ Failures are `{ok:false, code, message}`:
 | `SESSION_NOT_READY` | the conductor row has no host session id yet (still spawning) |
 | `NO_PENDING_QUESTION` | the named conductor's row shows no unanswered tool question; the message starts with its title |
 | `NO_PENDING_PLAN` | the named conductor's row shows no unanswered tool plan, or the host's latest messages hold none; the message starts with its title and says which |
+| `NO_PLAN` | the conductor has no plan in its recent events, or its text is unavailable (the message names the plan file when the host could not read it) |
+| `NO_SUCH_PART` | `part` is past the last part; carries `expected` (the number of parts) and `got` |
 | `CONFIRMATION_REQUIRED` | `approve_conductor_plan` without `confirmed: true` |
 | `INVALID_OPTION` | a choice matches no option, or several; carries `question` and `offered` |
 | `NOT_MULTISELECT` | several choices for a question the host treats as single-choice (only when its options could not be read first); carries the 1-based `question` |
@@ -142,9 +146,14 @@ Failures are `{ok:false, code, message}`:
 - **No `count`:** the host's default selection. The latest message is bonded back to the plan or questions message of its own turn, so `messages` can hold several entries.
 - **Explicit `count`:** exactly that many messages, literally and without bonding, as the host treats an explicit count.
 - Each `text` is the message body as the host renders it: prose, then a `--- plan ---` / `--- plan · saved to <path> ---` section and a `--- questions ---` section (`N. <question> (multiSelect: <bool>) · header: <h>`, then `   - <label>: <description>` per option) in the order they occurred. The host's `--- message i/N … ---` boundary line is dropped.
-- `hasPlan`, `planPath` and `questionCount` appear only on the message that carries them.
-- A `text` over 4000 chars keeps a trailing questions section whole and cuts the prose before it. A questions section that alone exceeds 4000 chars is shortened line by line (every line capped at 160, then 80, 40 and 20 chars until it fits, so descriptions go first but a label longer than the cap is cut too) and the message gets `questionsTruncated:true`. If even 20-char lines do not fit, trailing lines are dropped whole, the section ends with `… N more line(s) not shown`, and the message also gets `questionsDropped:true`. Anything else is cut from the end.
+- `hasPlan`, `planPath`, `planTruncated` and `questionCount` appear only on the message that carries them.
+- A `text` over 4000 chars keeps a trailing questions section whole and cuts the prose before it. A questions section that alone exceeds 4000 chars is shortened line by line (every line capped at 160, then 80, 40 and 20 chars until it fits, so descriptions go first but a label longer than the cap is cut too) and the message gets `questionsTruncated:true`. If even 20-char lines do not fit, trailing lines are dropped whole, the section ends with `… N more line(s) not shown`, and the message also gets `questionsDropped:true`. A plan, or any other text, is cut from the end; a message with a plan that is cut (here, or by the host's own result budget) gets `planTruncated:true`, and `read_conductor_plan` reads it whole.
 - If the `/mcp` read fails, or the session has no host session id yet, the result is the last `count` (default 1) assistant text messages from the events route, as `[{text}]`, and the failure is logged.
+
+### Reading a plan
+
+- `read_conductor_plan` reads the `plan` text of the newest `plan_request` event (not auto-approved) from `GET /api/instances/:id/events`; it makes no `/mcp` call and never adds the conductor to the announced set.
+- `planParts` (`src/hostEvents.js`) splits the text into parts of at most `PLAN_PART_CHARS` whose concatenation is exactly the plan. A part ends after a newline when one lies in the back half of its window, else it is cut at the limit.
 
 ### Answering and deciding
 
@@ -222,7 +231,7 @@ The page connects to `wss://generativelanguage.googleapis.com/ws/google.ai.gener
 |---|---|
 | `{"realtimeInput":{"audio":{"data":"<b64>","mimeType":"audio/pcm;rate=16000"}}}` | mic chunks (16-bit LE mono) while the mic is not paused |
 | `{"realtimeInput":{"audioStreamEnd":true}}` | `pauseMic()` while live, once per pause |
-| `{"realtimeInput":{"text":"CONDUCTOR UPDATE from \"<title>\" (session <id>):\n<text>[\n<footer>]"}}` | announcements; does not interrupt current speech. `<footer>` is the `AWAITING ANSWER` / `AWAITING PLAN APPROVAL` line, naming the tool and `session <id>`, when `ask` is set. Line breaks (`\n`, `\r`, `\v`, `\f`, U+001C–U+001E, U+0085, U+2028, U+2029) in `<title>`, `<id>` and a plan path in the footer become spaces, and `"` in `<title>` becomes `'`. A `<text>` line that reads as `CONDUCTOR UPDATE` or `AWAITING ` gets a leading `> `: invisible characters (`\p{Cf}`, default-ignorable code points) and combining marks (after NFKD) are dropped, any Unicode space counts as a space, case is ignored, and `AWAITING` must end at a word boundary, when deciding; the same breaks split `<text>` into lines. Look-alike letters and markdown-decorated markers are not caught (accepted residual risk). The transcript shows the title and text unchanged |
+| `{"realtimeInput":{"text":"CONDUCTOR UPDATE from \"<title>\" (session <id>):\n<text>[\n<footer>]"}}` | announcements; does not interrupt current speech. `<footer>` is the `AWAITING ANSWER` / `AWAITING PLAN APPROVAL` line, naming the tool and `session <id>`, when `ask` is set; for a plan with `ask.truncated` it ends with a sentence telling Gemini to read every part with `read_conductor_plan`. Line breaks (`\n`, `\r`, `\v`, `\f`, U+001C–U+001E, U+0085, U+2028, U+2029) in `<title>`, `<id>` and a plan path in the footer become spaces, and `"` in `<title>` becomes `'`. A `<text>` line that reads as `CONDUCTOR UPDATE` or `AWAITING ` gets a leading `> `: invisible characters (`\p{Cf}`, default-ignorable code points) and combining marks (after NFKD) are dropped, any Unicode space counts as a space, case is ignored, and `AWAITING` must end at a word boundary, when deciding; the same breaks split `<text>` into lines. Look-alike letters and markdown-decorated markers are not caught (accepted residual risk). The transcript shows the title and text unchanged |
 | `{"toolResponse":{"functionResponses":[{"id","name","response":<tool result>}]}}` | after each tool call, unless cancelled; no `scheduling` field |
 
 **Gemini → client:**

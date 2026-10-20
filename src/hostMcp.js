@@ -27,6 +27,7 @@ export function pairMessages({ meta, bodies }) {
     msgId: m.msgId,
     text: String(bodies[i] ?? '').replace(BOUNDARY, ''),
     ...(m.hasPlan ? { hasPlan: true } : {}),
+    ...(m.planTruncated ? { planTruncated: true } : {}),
     ...(m.planPath ? { planPath: m.planPath } : {}),
     ...(typeof m.questionCount === 'number' ? { questionCount: m.questionCount } : {}),
   }));

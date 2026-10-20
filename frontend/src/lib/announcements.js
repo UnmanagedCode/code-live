@@ -31,7 +31,10 @@ function askFooter(ask, sessionId) {
     else if (ask.truncated) cut = ' Some options above were shortened: say so, and let the user pick by option number.';
     return `${ASK_QUESTION_MARK}: ${ask.count} question(s). Use answer_conductor_question with session ${sessionId}.${cut}`;
   }
-  if (ask?.kind === 'plan') return `${ASK_PLAN_MARK}${ask.planPath ? ` (plan file: ${oneLine(ask.planPath)})` : ''}. Use approve_conductor_plan or reject_conductor_plan with session ${sessionId}.`;
+  if (ask?.kind === 'plan') {
+    const cut = ask.truncated ? ` The plan above is cut short: call read_conductor_plan with session ${sessionId} and read every part before summarizing it.` : '';
+    return `${ASK_PLAN_MARK}${ask.planPath ? ` (plan file: ${oneLine(ask.planPath)})` : ''}. Use approve_conductor_plan or reject_conductor_plan with session ${sessionId}.${cut}`;
+  }
   return '';
 }
 

@@ -15,7 +15,7 @@ import { createKeyStore } from '../src/keyStore.js';
 import { callTool } from '../src/tools.js';
 import { resolveAnswers, dropParenthetical } from '../src/answerMapping.js';
 import { createConductorService } from '../src/conductor.js';
-import { truncateBody, truncate, renderQuestions, renderPlan, assistantText, summarize, MAX_TEXT } from '../src/hostEvents.js';
+import { planParts, truncateBody, truncate, renderQuestions, renderPlan, assistantText, summarize, MAX_TEXT } from '../src/hostEvents.js';
 import { pairMessages } from '../src/hostMcp.js';
 import { createGemini } from '../src/gemini.js';
 import { installAnnouncements } from '../frontend/src/lib/announcements.js';
@@ -127,6 +127,12 @@ test('host events: reply truncation, rendering and text extraction', async () =>
     'fence-like lines': (n) => `--- questions --\n`.repeat(n / 17) + fence,
   };
   for (const [name, make] of Object.entries(shapes)) await assertLinear(`truncateBody ${name}`, make, (s) => truncateBody(s, MAX_TEXT));
+  const planShapes = {
+    'one long line': (n) => 'x'.repeat(n),
+    'all newlines': (n) => '\n'.repeat(n),
+    'newline every ~100 chars': (n) => `${'x'.repeat(99)}\n`.repeat(n / 100),
+  };
+  for (const [name, make] of Object.entries(planShapes)) await assertLinear(`planParts ${name}`, make, (s) => planParts(s));
   await assertLinear('truncate', (n) => 'x'.repeat(n), (s) => truncate(s, MAX_TEXT));
   await assertLinear('renderQuestions', (n) => Array.from({ length: n / 20 }, (_, i) => ({ question: `q${i}`, header: 'h', options: [{ label: 'l', description: 'd' }] })), renderQuestions);
   await assertLinear('renderPlan', (n) => ({ planPath: 'p'.repeat(n), plan: 'x\n'.repeat(n) }), renderPlan);

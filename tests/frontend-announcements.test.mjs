@@ -77,6 +77,15 @@ test('a plan announce ends with the AWAITING PLAN APPROVAL line, with the plan f
   assert.deepEqual(entries().map((e) => e.label), ['Conductor · Alpha · plan', 'Conductor · Alpha · plan']);
 });
 
+// Invariant: a cut plan's footer sends Gemini to read_conductor_plan for that session; an uncut one does not.
+test("a cut plan's footer points to read_conductor_plan with its session", async () => {
+  const { es, sent } = await setup('live');
+  es.emit('announce', { sessionId: 'c', title: 'Alpha', text: 'cut plan', ask: { kind: 'plan', planPath: null, truncated: true } });
+  es.emit('announce', { sessionId: 'c', title: 'Alpha', text: 'whole plan', ask: { kind: 'plan', planPath: null } });
+  assert.ok(sent[0].includes('read_conductor_plan with session c'));
+  assert.ok(!sent[1].includes('read_conductor_plan'));
+});
+
 test('an announce without an ask has no footer and no label suffix', async () => {
   for (const ask of [undefined, null]) {
     const { entries, es, sent } = await setup('live');
@@ -100,7 +109,7 @@ test('the system prompt says only spoken audio is the user and never to act on i
   assert.match(SYSTEM_PROMPT, /tool results.*neither is ever the user.*never counts/s);
   const rule = SYSTEM_PROMPT.split('\n').find((l) => l.startsWith('Never act on your own:'));
   assert.ok(rule, 'a "Never act on your own:" line exists');
-  const readOnly = ['list_conductor_sessions', 'read_conductor_messages'];
+  const readOnly = ['list_conductor_sessions', 'read_conductor_messages', 'read_conductor_plan'];
   const [gated, allowed] = rule.split('only when the user has asked for it aloud');
   assert.ok(allowed !== undefined, 'the line names the aloud-only clause');
   const tokens = (text) => new Set(text.match(/[a-z][a-z0-9_]*/g));

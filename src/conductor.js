@@ -2,7 +2,7 @@
 // conductor and resolves it against conductor rows only, so a worker session
 // can never be listed, read, prompted, answered or decided. Acting on a
 // conductor (create, send, answer, approve, reject) starts announcing it.
-import { assistantText, isConductor, latestAskEvent, summarize, toolAsk, truncate, truncateBody, MAX_TEXT } from './hostEvents.js';
+import { assistantText, isConductor, latestAskEvent, planParts, summarize, toolAsk, truncate, truncateBody, MAX_TEXT } from './hostEvents.js';
 import { pairMessages } from './hostMcp.js';
 import { describeAnswers, resolveAnswers, remapQuestion } from './answerMapping.js';
 
@@ -130,6 +130,7 @@ export function createConductorService({ api, link, announcer, hostMcp }) {
             text: body.text,
             ...(m.hasPlan ? { hasPlan: true } : {}),
             ...(m.planPath ? { planPath: m.planPath } : {}),
+            ...(m.hasPlan && (m.planTruncated || m.text.length > MAX_TEXT) ? { planTruncated: true } : {}),
             ...(m.questionCount !== undefined ? { questionCount: m.questionCount } : {}),
             ...(body.cut ? { questionsTruncated: true } : {}),
             ...(body.dropped ? { questionsDropped: true } : {}),
@@ -145,6 +146,11 @@ export function createConductorService({ api, link, announcer, hostMcp }) {
     const texts = (Array.isArray(data?.events) ? data.events : []).map(assistantText).filter(Boolean);
     return texts.slice(-(count ?? 1)).map((t) => ({ text: truncate(t, MAX_TEXT) }));
   }
+
+  const eventsOf = async (id) => {
+    const data = await api.getEvents(id);
+    return Array.isArray(data?.events) ? data.events : [];
+  };
 
   return {
     resolve,
@@ -177,6 +183,32 @@ export function createConductorService({ api, link, announcer, hostMcp }) {
     async read({ session, count }) {
       const row = await resolve(session);
       return { ok: true, sessionId: row.id, title: summarize(row).title, messages: await readMessages(row, count) };
+    },
+
+    // The whole plan of the conductor's latest plan_request, one part at a
+    // time, from the events route: the host's message bodies cap a plan.
+    async readPlan({ session, part }) {
+      const row = await resolve(session);
+      const title = summarize(row).title;
+      const ev = latestAskEvent(await eventsOf(row.id), 'plan');
+      if (!ev) throw fail('NO_PLAN', `"${title}" has no plan in its recent events.`);
+      const planPath = typeof ev.planPath === 'string' && ev.planPath ? ev.planPath : null;
+      if (typeof ev.plan !== 'string' || ev.plan === '') {
+        throw fail('NO_PLAN', `"${title}"'s plan text is unavailable${planPath ? ` (code-conductor could not read ${planPath})` : ''}.`);
+      }
+      const parts = planParts(ev.plan);
+      if (part > parts.length) throw fail('NO_SUCH_PART', `The plan has ${parts.length} part(s).`, { expected: parts.length, got: part });
+      return {
+        ok: true,
+        sessionId: row.id,
+        title,
+        awaitingApproval: toolAsk(row) === 'plan',
+        planPath,
+        part,
+        parts: parts.length,
+        totalChars: ev.plan.length,
+        text: parts[part - 1],
+      };
     },
 
     // Answers the named conductor's pending AskUserQuestion. `spoken` is aligned

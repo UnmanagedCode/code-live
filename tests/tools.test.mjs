@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startFakeHost } from './fakes/fakeHost.mjs';
 import { DECLARATIONS } from '../src/tools.js';
+import { PLAN_PART_CHARS } from '../src/hostEvents.js';
 import { startApp, callTool, req, CONDUCTOR_A, CONDUCTOR_B, WORKER } from './helpers.mjs';
 
 async function setup(t, { instances = [CONDUCTOR_A, CONDUCTOR_B, WORKER], events } = {}) {
@@ -19,7 +20,7 @@ async function setup(t, { instances = [CONDUCTOR_A, CONDUCTOR_B, WORKER], events
 const text = (t) => ({ kind: 'assistant_message', message: { content: [{ type: 'text', text: t }] } });
 const toolOnly = { kind: 'assistant_message', message: { content: [{ type: 'tool_use', id: 'x', name: 'Bash', input: {} }] } };
 
-const FIVE = ['send_to_conductor', 'read_conductor_messages', 'answer_conductor_question', 'approve_conductor_plan', 'reject_conductor_plan'];
+const FIVE = ['send_to_conductor', 'read_conductor_messages', 'read_conductor_plan', 'answer_conductor_question', 'approve_conductor_plan', 'reject_conductor_plan'];
 
 test('every tool that acts on a conductor declares session as a required string', () => {
   const byName = Object.fromEntries(DECLARATIONS.map((d) => [d.name, d.parameters]));
@@ -489,6 +490,81 @@ test('read reports hasPlan and planPath for a plan turn', async (t) => {
   host.finishAsk('cond-a', { kind: 'plan', plan: 'Step 1', planPath: '/plans/p.md', prose: 'Plan below.', frames: false });
   const r = await callTool(app, 'read_conductor_messages', { session: 'cond-a' });
   assert.deepEqual(r.messages, [{ text: 'Plan below.\n--- plan · saved to /plans/p.md ---\nStep 1', hasPlan: true, planPath: '/plans/p.md' }]);
+});
+
+const BIG_PLAN = Array.from({ length: 1500 }, (_, i) => `${i + 1}. step number ${i + 1} of the plan`).join('\n') + '\nLAST-LINE-UNIQUE';
+
+async function readAllParts(app, session = 'cond-a') {
+  const first = await callTool(app, 'read_conductor_plan', { session });
+  assert.equal(first.ok, true);
+  const results = [first];
+  for (let part = 2; part <= first.parts; part++) results.push(await callTool(app, 'read_conductor_plan', { session, part }));
+  return results;
+}
+
+// Invariant: a plan over the 4000-char read cap is reachable whole through the tool, part by part, over REST only.
+test('read_conductor_plan returns a plan over the old 4000-char cap whole, part by part', async (t) => {
+  const { host, app } = await setup(t);
+  host.finishAsk('cond-a', { kind: 'plan', plan: BIG_PLAN, planPath: '/plans/p.md', frames: false });
+  const results = await readAllParts(app);
+  assert.ok(results.length >= 3);
+  assert.equal(results.map((r) => r.text).join(''), BIG_PLAN);
+  results.forEach((r, i) => {
+    assert.ok(r.text.length <= PLAN_PART_CHARS);
+    assert.deepEqual([r.part, r.parts, r.totalChars, r.planPath, r.awaitingApproval], [i + 1, results.length, BIG_PLAN.length, '/plans/p.md', true]);
+  });
+  assert.equal(host.mcpCalls.length, 0, 'the plan comes from the events route, not /mcp');
+  assert.deepEqual(app.deps.state.get().watched, {}, 'reading never starts announcing');
+});
+
+// Invariant: the hard-cut path (no newline in reach) still loses nothing.
+test('a plan with no newlines still reads back whole', async (t) => {
+  const { host, app } = await setup(t);
+  const plan = 'x'.repeat(PLAN_PART_CHARS * 2 + 5);
+  host.finishAsk('cond-a', { kind: 'plan', plan, frames: false });
+  const results = await readAllParts(app);
+  assert.equal(results.length, 3);
+  assert.equal(results.map((r) => r.text).join(''), plan);
+  assert.equal(results[0].planPath, null);
+});
+
+// Invariant: bad input and an unreadable plan are refused with a code, never an empty success.
+test('read_conductor_plan refuses a bad part and a missing plan', async (t) => {
+  const { host, app } = await setup(t);
+  for (const part of [0, 1.5, '2', -1]) {
+    const r = await callTool(app, 'read_conductor_plan', { session: 'cond-a', part });
+    assert.deepEqual([r.ok, r.code], [false, 'INVALID_ARGS'], JSON.stringify(part));
+  }
+  const none = await callTool(app, 'read_conductor_plan', { session: 'cond-a' });
+  assert.deepEqual([none.ok, none.code], [false, 'NO_PLAN']);
+  host.finishAsk('cond-a', { kind: 'plan', plan: null, planPath: '/plans/gone.md', frames: false });
+  const unreadable = await callTool(app, 'read_conductor_plan', { session: 'cond-a' });
+  assert.equal(unreadable.code, 'NO_PLAN');
+  assert.match(unreadable.message, /\/plans\/gone\.md/);
+  host.finishAsk('cond-a', { kind: 'plan', plan: 'short plan', frames: false });
+  const past = await callTool(app, 'read_conductor_plan', { session: 'cond-a', part: 2 });
+  assert.deepEqual([past.code, past.expected, past.got], ['NO_SUCH_PART', 1, 2]);
+  assert.equal((await callTool(app, 'read_conductor_plan', { session: 'cond-a' })).text, 'short plan');
+  assert.deepEqual(app.deps.state.get().watched, {});
+});
+
+// Invariant: the 4000-char cut of a plan in a read is never silent; a short plan carries no flag.
+test('a read of a plan over the cap flags planTruncated; a short plan does not', async (t) => {
+  const { host, app } = await setup(t);
+  host.finishAsk('cond-a', { kind: 'plan', plan: BIG_PLAN, planPath: '/plans/p.md', frames: false });
+  const [m] = (await callTool(app, 'read_conductor_messages', { session: 'cond-a' })).messages;
+  assert.equal(m.planTruncated, true);
+  assert.ok(m.text.length <= 4000);
+  host.finishAsk('cond-a', { kind: 'plan', plan: 'Step 1', frames: false });
+  const [short] = (await callTool(app, 'read_conductor_messages', { session: 'cond-a' })).messages;
+  assert.equal('planTruncated' in short, false);
+  // The host's own flag passes through even on a short body.
+  host.setMcp('get_recent_messages', () => ({ content: [
+    { type: 'text', text: JSON.stringify({ messages: [{ msgId: 'm', hasPlan: true, planTruncated: true }] }) },
+    { type: 'text', text: '--- plan ---\nshortened' },
+  ] }));
+  const [flagged] = (await callTool(app, 'read_conductor_messages', { session: 'cond-a' })).messages;
+  assert.equal(flagged.planTruncated, true);
 });
 
 test('an explicit count is passed through and returns exactly that many messages, unbonded', async (t) => {

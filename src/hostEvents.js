@@ -3,6 +3,8 @@
 
 export const CONDUCTOR_PROJECT = '.conduct';
 export const MAX_TEXT = 4000;
+// The most plan text one read_conductor_plan result carries.
+export const PLAN_PART_CHARS = 12000;
 
 export function isConductor(inst) {
   return !!inst && inst.project === CONDUCTOR_PROJECT;
@@ -57,6 +59,23 @@ export function truncateBody(text, max) {
   }
   kept.push(`… ${capped.length - kept.length} more line(s) not shown`);
   return { text: kept.join('\n'), cut: true, dropped: true };
+}
+
+// Splits a plan into parts of at most `size` chars whose concatenation is
+// exactly `text`. A part breaks after a newline when one lies in the back half
+// of its window, so parts read back as the plan's own lines; otherwise it is
+// cut at `size`. Each lastIndexOf scans at most one window: linear overall.
+export function planParts(text, size = PLAN_PART_CHARS) {
+  const parts = [];
+  let start = 0;
+  while (start < text.length) {
+    if (start + size >= text.length) { parts.push(text.slice(start)); break; }
+    const nl = text.lastIndexOf('\n', start + size - 1);
+    const end = nl >= start + size / 2 ? nl + 1 : start + size;
+    parts.push(text.slice(start, end));
+    start = end;
+  }
+  return parts;
 }
 
 // Host payload fields are not trusted to be well formed: anything else than a

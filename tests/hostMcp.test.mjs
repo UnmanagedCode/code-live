@@ -58,6 +58,13 @@ test('pairMessages carries msgId and the plan and question markers', () => {
   ]);
 });
 
+test('pairMessages carries the host planTruncated flag', () => {
+  const meta = { messages: [{ msgId: 'a', hasPlan: true, planTruncated: true }, { msgId: 'b', hasPlan: true }] };
+  const [a, b] = pairMessages({ meta, bodies: ['x', 'y'] });
+  assert.equal(a.planTruncated, true);
+  assert.equal('planTruncated' in b, false);
+});
+
 test('a soft refusal throws its code with the reason and the remaining fields', async (t) => {
   const { host, mcp } = await withHost(t);
   host.setMcp('answer_question', () => mcpSoft('INVALID_OPTION', 'not offered', { questionIndex: 1, invalid: ['x'], offered: ['A', 'B'] }));

@@ -117,18 +117,20 @@ export function createAnnouncer({ api, link, state, publish, hostMcp }) {
     const carried = messages?.findLast((m) => m.hasPlan);
     if (!carried) add(renderPlan(pending.ev));
     const planPath = carried ? carried.planPath : pending.ev.planPath;
-    return { text, ask: { kind: 'plan', planPath: typeof planPath === 'string' ? planPath : null } };
+    return { text, ask: { kind: 'plan', planPath: typeof planPath === 'string' ? planPath : null, ...(carried?.planTruncated ? { truncated: true } : {}) } };
   }
 
   function emit(id, row, turnEnd, { text, ask }) {
     const fitted = text ? truncateBody(text, MAX_TEXT) : null;
+    // A plan is cut from the end without `fitted.cut`, so it is flagged by length.
+    const cutPlan = ask?.kind === 'plan' && !!text && text.length > MAX_TEXT;
     publish('announce', {
       sessionId: id,
       title: summarize(row).title,
       text: fitted ? fitted.text : NO_TEXT,
       turnSeq: turnEnd._seq,
       isError: !!turnEnd.isError,
-      ask: ask && fitted?.cut ? { ...ask, truncated: true, ...(fitted.dropped ? { dropped: true } : {}) } : ask,
+      ask: ask && (fitted?.cut || cutPlan) ? { ...ask, truncated: true, ...(fitted.dropped ? { dropped: true } : {}) } : ask,
     });
   }
 

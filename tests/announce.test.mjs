@@ -264,6 +264,15 @@ test('a turn ending on ExitPlanMode announces the plan with ask.planPath', async
   assert.deepEqual(inline.data.ask, { kind: 'plan', planPath: null });
 });
 
+// Invariant: a plan cut at the announcement cap is flagged on ask, never cut silently.
+test('a plan over 4000 chars is announced cut, with ask.truncated', async (t) => {
+  const { host, sse } = await setup(t);
+  host.finishAsk('cond-a', { kind: 'plan', plan: 'line\n'.repeat(2000), planPath: '/plans/big.md', prose: 'Big plan.' });
+  const ev = await sse.next('announce');
+  assert.deepEqual(ev.data.ask, { kind: 'plan', planPath: '/plans/big.md', truncated: true });
+  assert.ok(ev.data.text.length <= 4000);
+});
+
 test('no ask is reported when the row shows no unanswered tool ask (auto-approved, answered, or prose-only)', async (t) => {
   const { host, sse } = await setup(t);
   host.finishAsk('cond-a', { kind: 'plan', plan: 'auto-approved plan', row: { awaitingUser: null, awaitingUserSource: null } });

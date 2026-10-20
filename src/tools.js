@@ -31,12 +31,24 @@ export const DECLARATIONS = [
   },
   {
     name: 'read_conductor_messages',
-    description: "Read a conductor session's most recent assistant messages, including any plan or questions it is waiting on (questionCount, hasPlan, planPath). Never starts announcing it.",
+    description: "Read a conductor session's most recent assistant messages, including any plan or questions it is waiting on (questionCount, hasPlan, planPath). A message with `planTruncated` holds only part of its plan: read it with read_conductor_plan. Never starts announcing it.",
     parameters: {
       type: 'OBJECT',
       properties: {
         session: SESSION_PARAM,
         count: { type: 'INTEGER', description: 'Exactly how many recent messages to return, 1–10. Omit it to get the latest message together with the plan or questions its turn ended on.' },
+      },
+      required: ['session'],
+    },
+  },
+  {
+    name: 'read_conductor_plan',
+    description: 'Read the whole plan a conductor is waiting on (or its latest plan), in parts. A long plan comes in several parts (`parts`): read every part, from 1 up to `parts`, before you summarize the plan or the user decides on it. Never starts announcing it.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        session: SESSION_PARAM,
+        part: { type: 'INTEGER', description: 'Which part to read, from 1. Omit it for part 1.' },
       },
       required: ['session'],
     },
@@ -148,6 +160,14 @@ const HANDLERS = {
       count = args.count;
     }
     return service.read({ session: requiredSession(args), count });
+  },
+  read_conductor_plan: (args, service) => {
+    let part = 1;
+    if (args.part !== undefined && args.part !== null) {
+      if (!Number.isInteger(args.part) || args.part < 1) throw new ArgError('part must be an integer from 1');
+      part = args.part;
+    }
+    return service.readPlan({ session: requiredSession(args), part });
   },
   answer_conductor_question: (args, service) => service.answer({ session: requiredSession(args), answers: answerEntries(args) }),
   approve_conductor_plan: (args, service) => {
