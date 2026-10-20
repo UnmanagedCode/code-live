@@ -321,6 +321,22 @@ test('a cut pending plan behind a later turn is announced with truncated', async
   assert.equal(ev.messageKeys.length, 1);
 });
 
+// Invariant: an announcement built from a turn window that does not reach the turn's start is marked cut, and its
+// messageKeys name only messages that began inside the window: never the message the window seam runs through.
+test('a turn window that misses the turn start is announced cut, with keys only for whole messages', async (t) => {
+  const { host, app, sse } = await setup(t);
+  host.addEvent('cond-a', { kind: 'message_start', msgId: 'big' });
+  for (let i = 0; i < 4500; i++) host.addEvent('cond-a', { kind: 'text_delta', msgId: 'big', blockIdx: 0, text: 'word ' });
+  host.finishTurn('cond-a', 'The closing words.');
+  const ev = (await sse.next('announce')).data;
+  assert.equal(ev.text, 'The closing words.');
+  assert.equal(ev.truncated, true);
+  assert.equal(ev.messageKeys.length, 1);
+  assert.match(ev.messageKeys[0], /-m\d+$/, 'the closing message, not the long one');
+  assert.ok(!ev.messageKeys.some((k) => k.endsWith('-big')));
+  assert.equal((await callTool(app, 'read_conductor_messages', { session: 'cond-a', messageKey: ev.messageKeys[0] })).text, 'The closing words.');
+});
+
 // Invariant: a short plan and a short reply carry neither truncated nor messageKeys.
 test('a short announcement carries no truncated and no messageKeys', async (t) => {
   const { host, sse } = await setup(t);

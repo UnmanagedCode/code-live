@@ -609,6 +609,87 @@ test('a message older than the ring is reached with nextBefore and read whole', 
   assert.equal((await readParts(app, older.messages[0].messageKey)).map((r) => r.text).join(''), old);
 });
 
+// Adds `n` top-level events that belong to no message (tool traffic) to a conductor.
+const noise = (host, n, id = 'cond-a') => { for (let i = 0; i < n; i++) host.addEvent(id, { kind: 'tool_use', name: 'Bash', input: {} }); };
+// Adds a message streamed as one message_start and `deltas` text_deltas of `chunk`.
+function streamLong(host, msgId, deltas, chunk = 'word ', id = 'cond-a') {
+  host.addEvent(id, { kind: 'message_start', msgId });
+  for (let i = 0; i < deltas; i++) host.addEvent(id, { kind: 'text_delta', msgId, blockIdx: 0, text: chunk });
+}
+
+// Invariant: a window that ends inside a plan message never drops that message: the plan bonded to the trailing prose
+// of its turn is listed with it, though the host has older events than the newest page.
+test('a plan message at the old end of the newest page is listed, bonded to the trailing prose', async (t) => {
+  const { host, app } = await setup(t);
+  noise(host, 99);
+  host.addEvent('cond-a', { kind: 'turn_end' });
+  host.addEvent('cond-a', { kind: 'message_start', msgId: 'plan-msg' });
+  host.addEvent('cond-a', { kind: 'text_delta', msgId: 'plan-msg', blockIdx: 0, text: 'The plan.' });
+  host.addEvent('cond-a', { kind: 'tool_use', msgId: 'plan-msg', blockIdx: 1, toolUseId: 'tuP', name: 'ExitPlanMode', input: { plan: 'Step 1' } });
+  host.addEvent('cond-a', { kind: 'plan_request', toolUseId: 'tuP', plan: 'Step 1', planPath: null });
+  host.addEvent('cond-a', { kind: 'message_start', msgId: 'prose-msg' });
+  host.addEvent('cond-a', { kind: 'text_delta', msgId: 'prose-msg', blockIdx: 0, text: 'Waiting for approval.' });
+  noise(host, 441);
+  const r = await callTool(app, 'read_conductor_messages', { session: 'cond-a' });
+  assert.deepEqual(r.messages.map((m) => [m.messageKey, m.hasPlan ?? false]), [['101-plan-msg', true], ['105-prose-msg', false]]);
+  assert.equal(r.messages[0].text, 'The plan.\n--- plan ---\nStep 1');
+});
+
+// Invariant: a message longer than several event pages is listed whole (its start found by reading back), never
+// dropped as a fragment and never an empty success; its key then reads it whole.
+test('one message of thousands of events lists and reads back whole', async (t) => {
+  const { host, app } = await setup(t);
+  streamLong(host, 'long', 4500);
+  host.addEvent('cond-a', { kind: 'turn_end' });
+  const body = 'word '.repeat(4500);
+  for (const args of [{}, { count: 1 }]) {
+    const r = await callTool(app, 'read_conductor_messages', { session: 'cond-a', ...args });
+    assert.equal(r.ok, true, JSON.stringify(args));
+    assert.deepEqual(r.messages.map((m) => [m.messageKey, m.totalChars, m.truncated]), [['1-long', body.length, true]], JSON.stringify(args));
+    assert.match(r.hint, /read each whole/);
+  }
+  assert.equal((await readParts(app, '1-long')).map((p) => p.text).join(''), body);
+});
+
+// Invariant: when no whole message lies within the reach of a read, a listing is refused, never an empty success; a
+// keyed read of a message that does not close within its page bound is refused, never returned as a fragment.
+test('a message beyond the read bound is refused by both reads', async (t) => {
+  const { host, app } = await setup(t);
+  streamLong(host, 'huge', 33_000, 'x');
+  host.addEvent('cond-a', { kind: 'turn_end' });
+  const listing = await callTool(app, 'read_conductor_messages', { session: 'cond-a' });
+  assert.deepEqual([listing.ok, listing.code], [false, 'MESSAGES_NOT_REACHED']);
+  const keyed = await callTool(app, 'read_conductor_messages', { session: 'cond-a', messageKey: '1-huge' });
+  assert.deepEqual([keyed.ok, keyed.code], [false, 'MESSAGE_TOO_LONG']);
+});
+
+// Invariant: a message still being written reads as what has arrived, and says so; once its turn ends it does not.
+test('a message still being written is read with inProgress until it closes', async (t) => {
+  const { host, app } = await setup(t);
+  streamLong(host, 'live', 3, 'abc ');
+  const open = await callTool(app, 'read_conductor_messages', { session: 'cond-a', messageKey: '1-live' });
+  assert.deepEqual([open.ok, open.inProgress, open.text], [true, true, 'abc abc abc ']);
+  host.addEvent('cond-a', { kind: 'turn_end' });
+  const closed = await callTool(app, 'read_conductor_messages', { session: 'cond-a', messageKey: '1-live' });
+  assert.equal('inProgress' in closed, false);
+});
+
+// Invariant: a key whose seq a respawn has moved into the middle of the same message (same msgId, so the msgId check
+// passes) is MESSAGE_NOT_FOUND, never the tail of that message.
+test('a key that lands inside its own renumbered message is MESSAGE_NOT_FOUND, not the tail', async (t) => {
+  const { host, app } = await setup(t);
+  noise(host, 2);
+  for (const chunk of ['Hello ', 'beautiful ', 'world']) host.addEvent('cond-a', { kind: 'text_delta', msgId: 'X', blockIdx: 0, text: chunk });
+  host.addEvent('cond-a', { kind: 'turn_end' });
+  const [m] = (await callTool(app, 'read_conductor_messages', { session: 'cond-a' })).messages;
+  assert.deepEqual([m.messageKey, m.text], ['3-X', 'Hello beautiful world']);
+  host.resetRing('cond-a', { drop: (ev) => ev.msgId === undefined && ev.kind === 'tool_use' });
+  const stale = await callTool(app, 'read_conductor_messages', { session: 'cond-a', messageKey: m.messageKey });
+  assert.deepEqual([stale.ok, stale.code], [false, 'MESSAGE_NOT_FOUND']);
+  const fresh = await callTool(app, 'read_conductor_messages', { session: 'cond-a', messageKey: '1-X' });
+  assert.equal(fresh.text, 'Hello beautiful world');
+});
+
 // Invariant: a key never yields another message's text: an unknown key, and a key whose seq a respawn reassigned to a
 // different message, are both MESSAGE_NOT_FOUND.
 test('an unknown key and a renumbered key are MESSAGE_NOT_FOUND', async (t) => {

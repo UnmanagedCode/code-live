@@ -16,7 +16,7 @@ const DEFAULT_ORDER = ['prose', 'narration', 'plan', 'questions'];
 function newMessage(msgId, ev, turn) {
   return {
     msgId, firstSeq: ev._seq, turn,
-    envelope: null, deltas: null, narration: null,
+    opened: false, envelope: null, deltas: null, narration: null,
     plan: '', planPath: '', hasPlan: false, questions: null, order: [],
   };
 }
@@ -55,6 +55,7 @@ function finish(m) {
     key: `${m.firstSeq}-${m.msgId}`,
     msgId: m.msgId,
     firstSeq: m.firstSeq,
+    opened: m.opened,
     turn: m.turn,
     prose,
     narration,
@@ -67,7 +68,7 @@ function finish(m) {
 }
 
 // The text-bearing messages in `events`, oldest first, each
-// `{key, msgId, firstSeq, turn, prose, narration, plan, planPath, hasPlan,
+// `{key, msgId, firstSeq, opened, turn, prose, narration, plan, planPath, hasPlan,
 // questions, order}`. Events without a numeric `_seq`, and a sub-agent's
 // (`parentToolUseId`), form nothing. `turn` counts the top-level turn_ends
 // before the message. The key's seq is a lookup hint, never an identity: a
@@ -105,6 +106,7 @@ export function assembleMessages(events) {
       ordered.push(m);
     }
     latest = m;
+    if (ev.kind === 'message_start') m.opened = true;
     if (ev.kind === 'text_delta') {
       append(m, 'deltas', ev.blockIdx, str(ev.text));
       stamp(m, 'prose');
@@ -122,6 +124,20 @@ export function assembleMessages(events) {
     }
   }
   return ordered.map(finish).filter(Boolean);
+}
+
+// The messages of a window of events that is cut at its old end (`complete`
+// false: the host has older events). The oldest message is left out when the
+// window may start inside it: its first event is the window's first and is not
+// a message_start, so earlier events of it may lie below. A message that began
+// inside the window is whole. Returns `{messages, partial}`, `partial` being the
+// message left out, or null.
+export function wholeMessages(events, complete) {
+  const messages = assembleMessages(events);
+  const first = messages[0];
+  if (complete || !first || first.opened) return { messages, partial: null };
+  if (first.firstSeq !== events.find(hasSeq)?._seq) return { messages, partial: null };
+  return { messages: messages.slice(1), partial: first };
 }
 
 // The host's full body of a message: its segments in arrival order, joined with

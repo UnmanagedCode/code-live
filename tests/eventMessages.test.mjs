@@ -5,7 +5,7 @@
 // one turn.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { assembleMessages, bondedSelection, messageBody, parseMessageKey } from '../src/eventMessages.js';
+import { assembleMessages, bondedSelection, messageBody, parseMessageKey, wholeMessages } from '../src/eventMessages.js';
 
 const seq = (events) => events.map((ev, i) => (ev._seq === undefined ? { ...ev, _seq: i + 1 } : ev));
 const envelope = (msgId, blocks, extra = {}) => ({ kind: 'assistant_message', msgId, message: { content: blocks }, ...extra });
@@ -101,4 +101,19 @@ test('parseMessageKey accepts <seq>-<msgId> and nothing else', () => {
   for (const bad of ['', '-m', '1-', 'x-m', '1x-m', '12', ' 1-m', '-1-m', '1.5-m', '9'.repeat(16) + '-m', 7, null, undefined, {}]) {
     assert.equal(parseMessageKey(bad), null, JSON.stringify(bad));
   }
+});
+
+// Invariant: a window cut at its old end leaves out the oldest message only when it may start below the window (its
+// first event is the window's first and is no message_start); a message that opened inside the window, or any message
+// in a window the host has nothing older than, is never left out.
+test('wholeMessages leaves out only a message the window may start inside', () => {
+  const cutInside = seq([delta('a', 0, 'tail of a'), { kind: 'message_start', msgId: 'b' }, delta('b', 0, 'whole b')]);
+  const openedFirst = seq([{ kind: 'message_start', msgId: 'a' }, delta('a', 0, 'whole a'), { kind: 'message_start', msgId: 'b' }, delta('b', 0, 'whole b')]);
+  const laterStart = seq([{ kind: 'tool_use', name: 'Bash' }, delta('a', 0, 'a starts after the first event')]);
+  assert.deepEqual(wholeMessages(cutInside, false).messages.map((m) => m.msgId), ['b']);
+  assert.equal(wholeMessages(cutInside, false).partial.msgId, 'a');
+  assert.deepEqual(wholeMessages(cutInside, true).messages.map((m) => m.msgId), ['a', 'b'], 'nothing older: the first message is whole');
+  assert.deepEqual(wholeMessages(openedFirst, false).messages.map((m) => m.msgId), ['a', 'b']);
+  assert.deepEqual(wholeMessages(laterStart, false).messages.map((m) => m.msgId), ['a']);
+  assert.deepEqual(wholeMessages([], false), { messages: [], partial: null });
 });

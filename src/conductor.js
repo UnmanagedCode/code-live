@@ -3,11 +3,12 @@
 // can never be listed, read, prompted, answered or decided. Acting on a
 // conductor (create, send, answer, approve, reject) starts announcing it.
 import { askTurnEnd, hasSeq, isConductor, isTopLevel, latestAskEvent, summarize, textParts, toolAsk, truncateBody, MAX_TEXT } from './hostEvents.js';
-import { assembleMessages, bondedSelection, messageBody } from './eventMessages.js';
-import { readBack, readForward } from './eventPages.js';
+import { assembleMessages, bondedSelection, messageBody, wholeMessages } from './eventMessages.js';
+import { MAX_MESSAGE_PAGES, readBack, readForward } from './eventPages.js';
 import { describeAnswers, resolveAnswers, remapQuestion } from './answerMapping.js';
 
 const CUT_HINT = 'Messages marked truncated are cut: read each whole with its messageKey, part 1 up to parts.';
+const TURN_HINT = 'The start of this turn is further back than the read could reach: a plan or question of the turn may be older. Read older messages with before set to nextBefore.';
 const REPLY_NOTE = 'The reply will be announced when the conductor finishes its turn.';
 const APPROVED_NOTE = 'The conductor is now running without permission prompts. Its reply will be announced when it finishes its turn.';
 const REJECTED_NOTE = 'The conductor will revise the plan. Its reply will be announced when it finishes its turn.';
@@ -152,30 +153,40 @@ export function createConductorService({ api, link, announcer, hostMcp }) {
     };
   }
 
-  // Whether a message window holds enough settled messages for the request: more
-  // than `want` (the oldest may be cut at the page seam), and for the default
-  // selection its turn's start too.
+  // Whether a window holds what the request needs: `want` whole messages (the
+  // oldest is not counted while the window may start inside it), and for the
+  // default selection its turn's start too, or an ask already bonded.
   const enoughFor = (want, byTurn) => (events) => {
-    const messages = assembleMessages(events);
-    if (messages.length <= want) return false;
-    return !byTurn || reachesTurnStart(events, messages.at(-1));
+    const { messages } = wholeMessages(events, false);
+    if (messages.length < want) return false;
+    if (!byTurn) return true;
+    const last = messages.at(-1);
+    return bondedSelection(messages).length > 1 || !!last.questions || last.hasPlan || reachesTurnStart(events, last);
   };
 
-  // The message listing. When the host reports older events than the window
-  // holds, the oldest message in it may be cut at the page seam and is not listed.
+  // The message listing. A message the window may start inside is never listed
+  // (see `wholeMessages`); the read goes back until the messages asked for are
+  // whole. A window with none, where the host has older events, is refused:
+  // an empty list would read as a conductor with nothing to say.
   async function listMessages(row, { count, before }) {
     const byTurn = count === undefined && !before;
-    const { events, complete } = await readBack(api, row.id, { before: before?.seq, enough: enoughFor(count ?? 1, byTurn) });
-    let messages = assembleMessages(events);
-    if (!complete) messages = messages.slice(1);
+    const { events, complete } = await readBack(api, row.id, { before: before?.seq, enough: enoughFor(count ?? 1, byTurn), maxPages: MAX_MESSAGE_PAGES });
+    const { messages, partial } = wholeMessages(events, complete);
+    if (messages.length === 0 && (partial || !complete)) {
+      throw fail('MESSAGES_NOT_REACHED', `No whole message of "${summarize(row).title}" lies within the newest events the read can reach${partial ? ' (the newest message is longer than that)' : ''}.`);
+    }
     let picked;
     if (count !== undefined) picked = messages.slice(-count);
     else picked = before ? messages.slice(-1) : bondedSelection(messages);
     const start = picked.length ? messages.indexOf(picked[0]) : 0;
     const items = picked.map(listed);
+    // The default selection is bonded to its turn: without the turn's start in
+    // the window, an older plan or question of the turn may be missing.
+    const turnOpen = byTurn && !complete && !reachesTurnStart(events, messages.at(-1)) && picked.length === 1 && !picked[0].hasPlan && !picked[0].questions;
+    const hints = [...(items.some((m) => m.truncated) ? [CUT_HINT] : []), ...(turnOpen ? [TURN_HINT] : [])];
     return {
       messages: items,
-      ...(items.some((m) => m.truncated) ? { hint: CUT_HINT } : {}),
+      ...(hints.length ? { hint: hints.join(' ') } : {}),
       ...(!complete || start > 0 ? { nextBefore: picked[0]?.key } : {}),
     };
   }
@@ -230,16 +241,22 @@ export function createConductorService({ api, link, announcer, hostMcp }) {
       return { ok: true, sessionId: row.id, title: summarize(row).title, ...await listMessages(row, { count, before }) };
     },
 
-    // One message whole, a part at a time, from the events after its first
-    // event. A key whose seq no longer starts that message is refused: a respawn
-    // renumbers the stream and keeps only the msgId.
+    // One message whole, a part at a time, from the events around its first
+    // event. The read starts one event early, so a key whose seq has been
+    // reassigned to the middle of that message (a respawn renumbers the stream
+    // and keeps only the msgId) finds the message starting earlier and is refused.
+    // A message that does not close within the page bound is refused, never
+    // returned as a fragment; one still being written says so (`inProgress`).
     async readMessage({ session, messageKey, part }) {
       const row = await resolve(session);
       const title = summarize(row).title;
-      const events = await readForward(api, row.id, { after: messageKey.seq - 1, done: messageDone(messageKey.msgId) });
-      const [m] = assembleMessages(events);
-      if (!m || m.msgId !== messageKey.msgId || m.firstSeq !== messageKey.seq) {
+      const read = await readForward(api, row.id, { after: messageKey.seq - 2, done: messageDone(messageKey.msgId), maxPages: MAX_MESSAGE_PAGES });
+      const m = assembleMessages(read.events).find((x) => x.msgId === messageKey.msgId);
+      if (!m || m.firstSeq !== messageKey.seq) {
         throw fail('MESSAGE_NOT_FOUND', `No message ${messageKey.seq}-${messageKey.msgId} in "${title}" any more; list the messages again with read_conductor_messages.`);
+      }
+      if (!read.done && !read.ended) {
+        throw fail('MESSAGE_TOO_LONG', `The message ${m.key} of "${title}" is longer than the read can reach in one go, so it cannot be read whole.`);
       }
       const body = messageBody(m);
       const parts = textParts(body);
@@ -253,6 +270,7 @@ export function createConductorService({ api, link, announcer, hostMcp }) {
         parts: parts.length,
         totalChars: body.length,
         text: parts[part - 1],
+        ...(read.done ? {} : { inProgress: true }),
         ...(m.hasPlan ? { hasPlan: true } : {}),
         ...(m.planPath ? { planPath: m.planPath } : {}),
         ...(m.questions ? { questionCount: m.questions.length } : {}),

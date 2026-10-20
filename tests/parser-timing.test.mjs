@@ -1,13 +1,15 @@
 // Pins: every parser of untrusted input (request bodies and targets, model and
 // conductor output, host bodies, upstream errors, and the page's announcement
 // and Live message handling) stays linear on its worst input shape. Each case is
-// timed at doubling sizes (best of 3): the largest size must finish within
-// LIMIT_MS, and once the time is measurable, a doubling must not come near the
-// fourfold growth of a quadratic. Also pins that the linear rewrites of
+// timed at doubling sizes (best of 3, each from a collected heap): the largest
+// size must finish within LIMIT_MS, and once the time is measurable, a fourfold
+// span of input must not come near the sixteenfold growth of a quadratic. Also pins that the linear rewrites of
 // dropParenthetical and truncateBody's newline strip give the old regexes'
 // output on generated inputs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import v8 from 'node:v8';
+import vm from 'node:vm';
 import { readJsonBody } from '../src/http.js';
 import { createSseHub } from '../src/sse.js';
 import { createPrefsStore } from '../src/prefsStore.js';
@@ -24,19 +26,24 @@ import { createLiveSession } from '../frontend/src/lib/liveSession.js';
 import { tempDir, SENTINEL_KEY } from './helpers.mjs';
 
 const SIZES = [10_000, 20_000, 40_000, 80_000];
-// assembleMessages allocates an object per message, so past about 40k events garbage collection adds a cost that grows
-// with the heap; these sizes stay where the per-event cost is flat, and a quadratic still shows at them.
-const EVENT_SIZES = [5_000, 10_000, 20_000, 40_000];
 const BODY_SIZES = [8_192, 16_384, 32_768, 65_536]; // readJsonBody refuses more than 64 KB
 // textParts is under a millisecond at SIZES, so a quadratic scan only shows at plan-sized inputs.
 const PART_SIZES = [1_000_000, 2_000_000, 4_000_000];
 const LIMIT_MS = 250;
 const MEASURABLE_MS = 5;
-const MAX_RATIO = 3; // a quadratic grows about 4x per doubling
+// Growth is judged over a fourfold span of input: a linear parser then takes about 4x as long and a quadratic about
+// 16x, so a threshold of 8 keeps a margin of 2x on both sides (a single doubling, 2x against 4x, left under 1.5x).
+const MAX_SPAN_RATIO = 8;
+const SPAN_FLOOR_MS = 1;
+
+// A garbage collection inside a timed run adds cost that grows with the heap, so each sample starts from a collected heap.
+v8.setFlagsFromString('--expose-gc');
+const gc = vm.runInNewContext('gc');
 
 async function best(fn, input) {
   let min = Infinity;
   for (let i = 0; i < 3; i++) {
+    gc();
     const t = performance.now();
     await fn(input);
     min = Math.min(min, performance.now() - t);
@@ -49,8 +56,8 @@ async function assertLinear(name, make, run, sizes = SIZES) {
   for (const n of sizes) times.push(await best(run, make(n)));
   const shown = times.map((t, i) => `${sizes[i]}: ${t.toFixed(1)} ms`).join(', ');
   assert.ok(times.at(-1) < LIMIT_MS, `${name}: ${shown}`);
-  const [t40, t80] = times.slice(-2);
-  if (t40 >= MEASURABLE_MS) assert.ok(t80 / t40 < MAX_RATIO, `${name} grows superlinearly: ${shown}`);
+  const [small, mid, large] = times.slice(-3);
+  if (mid >= MEASURABLE_MS) assert.ok(large / Math.max(small, SPAN_FLOOR_MS) < MAX_SPAN_RATIO, `${name} grows superlinearly: ${shown}`);
 }
 
 const bodyReq = (raw) => ({ headers: { 'content-type': 'application/json' }, async *[Symbol.asyncIterator]() { yield Buffer.from(raw); } });
@@ -161,7 +168,7 @@ test('events: message assembly, selection, body rendering and key parsing', asyn
     const messages = assembleMessages(events);
     return truncateBody(bondedSelection(messages).map(messageBody).join('\n'), MAX_TEXT);
   };
-  for (const [name, make] of Object.entries(shapes)) await assertLinear(`assembleMessages ${name}`, make, run, EVENT_SIZES);
+  for (const [name, make] of Object.entries(shapes)) await assertLinear(`assembleMessages ${name}`, make, run);
   const keys = {
     'digits only': (n) => '1'.repeat(n),
     'digits then dash': (n) => `${'1'.repeat(14)}-${'m'.repeat(n)}`,

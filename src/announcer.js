@@ -21,7 +21,7 @@ import {
   askId, askTurnEnd, hasSeq, isConductor, isTopLevel, lastAssistantMsgId, latestAskEvent, newestTurnEnd,
   renderPlan, renderQuestions, summarize, toolAsk, truncateBody, MAX_TEXT,
 } from './hostEvents.js';
-import { assembleMessages, bondedSelection, messageBody } from './eventMessages.js';
+import { bondedSelection, messageBody, wholeMessages } from './eventMessages.js';
 import { readBack } from './eventPages.js';
 
 const NO_TEXT = '(turn finished with no text reply)';
@@ -75,22 +75,31 @@ export function createAnnouncer({ api, link, state, publish }) {
   // The events of the turn that ended at `turnEnd`: after the previous turn_end,
   // before this one. When the trailing page does not reach that turn's start and
   // the host has older events, older pages are read until a turn_end shows.
+  // `complete` is whether the window starts at the turn's start; it does not when
+  // the page bound stopped the read first.
   async function turnEvents(id, data, turnEnd) {
     let events = Array.isArray(data?.events) ? data.events : [];
-    if (!events.some((ev) => isTurnEnd(ev) && ev._seq < turnEnd._seq) && data?.hasMore) {
+    let more = !!data?.hasMore;
+    const reaches = (evs) => evs.some((ev) => isTurnEnd(ev) && ev._seq < turnEnd._seq);
+    if (!reaches(events) && more) {
       const first = events.find(hasSeq);
-      if (first) events = (await readBack(api, id, { before: first._seq, enough: (older) => older.some(isTurnEnd) })).events.concat(events);
+      if (first) {
+        const older = await readBack(api, id, { before: first._seq, enough: (evs) => evs.some(isTurnEnd) });
+        events = older.events.concat(events);
+        more = !older.complete;
+      }
     }
     let start = -Infinity;
     for (const ev of events) if (isTurnEnd(ev) && ev._seq < turnEnd._seq && ev._seq > start) start = ev._seq;
-    return events.filter((ev) => hasSeq(ev) && ev._seq > start && ev._seq < turnEnd._seq);
+    return { window: events.filter((ev) => hasSeq(ev) && ev._seq > start && ev._seq < turnEnd._seq), complete: start > -Infinity || !more };
   }
 
   // The text, ask and message keys of one announcement. `pending` is the
   // unannounced ask that ended this turn; its content is added from its own event
   // unless the turn's messages already carry it.
-  function compose({ window, pending }) {
-    const selected = bondedSelection(assembleMessages(window));
+  function compose({ window, complete, pending }) {
+    const { messages } = wholeMessages(window, complete);
+    const selected = bondedSelection(messages);
     let text = selected.map(messageBody).filter(Boolean).join('\n');
     const add = (section) => { text = [text, section].filter(Boolean).join('\n'); };
     let ask = null;
@@ -104,12 +113,12 @@ export function createAnnouncer({ api, link, state, publish }) {
       const planPath = carried ? carried.planPath : pending.ev.planPath;
       ask = { kind: 'plan', planPath: typeof planPath === 'string' && planPath ? planPath : null };
     }
-    return { text, ask, keys: selected.map((m) => m.key) };
+    return { text, ask, keys: selected.map((m) => m.key), windowCut: !complete };
   }
 
-  function emit(id, row, turnEnd, { text, ask, keys }) {
+  function emit(id, row, turnEnd, { text, ask, keys, windowCut }) {
     const fitted = text ? truncateBody(text, MAX_TEXT) : null;
-    const cut = !!text && text.length > MAX_TEXT;
+    const cut = windowCut || (!!text && text.length > MAX_TEXT);
     publish('announce', {
       sessionId: id,
       title: summarize(row).title,
@@ -173,12 +182,12 @@ export function createAnnouncer({ api, link, state, publish }) {
     // An ask that an older turn ended (or a replayed one) is announced by itself,
     // before the later turn.
     if (pending && !combined) {
-      const content = compose({ window: await turnEvents(id, data, pending.end), pending });
+      const content = compose({ ...await turnEvents(id, data, pending.end), pending });
       await patchCursor(id, { lastHandledAskId: pending.id });
       emit(id, row, pending.end, content);
     }
     if (announceTurn) {
-      const content = compose({ window: await turnEvents(id, data, turnEnd), pending: combined ? pending : null });
+      const content = compose({ ...await turnEvents(id, data, turnEnd), pending: combined ? pending : null });
       await patchCursor(id, { lastHandledTurnSeq: turnEnd._seq, lastHandledMsgId: msgId, ...(combined ? { lastHandledAskId: pending.id } : {}) });
       emit(id, row, turnEnd, content);
     }
