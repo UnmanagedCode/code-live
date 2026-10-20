@@ -128,8 +128,12 @@ The backend exits with an error if `PROJECTS_ROOT` or `CONDUCTOR_URL` is missing
 - A reconcile after downtime can announce a turn the host would have suppressed: a conductor pausing while it waits on a worker.
 - Gemini connections recycle about every 10 minutes. The client resumes with the latest handle (valid for 2 hours after a disconnect).
 - Ephemeral tokens are a `v1beta` preview feature of the Gemini API.
-- **`gemini-3.8-live-extended-thinking` tool calls usually fail, upstream.** The server usually never sends the `toolCall`: after the spoken filler (a `turnComplete` with `interactionStatus: IN_PROGRESS`) the model says a system error occurred or goes silent. The setup meets every tool rule on the [model page](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-live-extended-thinking): every function is `NON_BLOCKING`, no `scheduling` is sent, and `thinkingLevel` is `low`.
-  - **Reproduce:** one `realtimeInput.text` asking for `list_conductor_sessions`, sent over the `buildSetup` setup on a v1beta ephemeral token (`BidiGenerateContentConstrained`). In 10 sequential runs this model got a `toolCall` 0 times; `gemini-3.8-live` got one 10 times and `gemini-3.1-flash-live-preview` completed the round-trip 10 times.
+- **`gemini-3.8-live-extended-thinking` tool calls are too slow to use, upstream.** The `toolCall` usually arrives, but only 3–150 s after the spoken filler (a `turnComplete` with `interactionStatus: IN_PROGRESS`), and sometimes not at all. Otherwise the turn ends IDLE, with the model saying a system error occurred, or rarely silent. The setup meets every tool rule on the [model page](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-live-extended-thinking): every function is `NON_BLOCKING`, no `scheduling` is sent, and `thinkingLevel` is `low`.
+  - **Reproduce:** one text or spoken request for a single tool, each variant run at least 10 times next to `gemini-3.8-live` as control, on a free-tier key.
+    - Pooled over 84 runs: 56 toolCalls, 51 completed round-trips, 7 round-trips within 60 s, 26 "system error" replies.
+    - Control (`gemini-3.8-live`): 83/83 round-trips, about 5 s each.
+    - code-live's own setup (one `realtimeInput.text` asking for `list_conductor_sessions`, sent over the `buildSetup` setup on a v1beta ephemeral token, `BidiGenerateContentConstrained`): 2/10 toolCalls, 0 within 60 s, 5/10 "system error".
+  - **Cause:** the delay is the model's background reasoning, not function calling. With no tools declared, the same 6–148 s delay and the same apology appear.
   - **Settings that don't change the result:**
     - the `v1alpha` `BidiGenerateContent` endpoint with the API key
     - `thinkingLevel` `LOW`, `medium` or `high`
@@ -139,6 +143,13 @@ The backend exits with an error if `PROJECTS_ROOT` or `CONDUCTOR_URL` is missing
     - no system prompt
     - no compression, resumption or transcription
     - `clientContent` instead of `realtimeInput.text`
+    - spoken audio input (automatic or manual activity detection) instead of text
+    - the official `@google/genai` SDK
+    - a minimal setup instead of code-live's
+    - the server rejects `thinkingBudget`, `toolConfig` and TEXT response modality on this model, so they can't be tried
+  - **Indicative only (too few runs to be sure):** one retry after the IDLE "system error" turn raised toolCalls from 7/10 to 10/10, and spoken input drew fewer apologies. Neither shortens the delay.
+  - **Untested:** a billed key. Per-key rate limiting may contribute: a 180 s pause before each run did better over 4 runs.
+  - A smoke test or probe that waits under about 240 s per tool turn can't observe the late toolCall.
   - The picker labels the model with its `hint` from `MODELS`, and its real smoke test checks only connection and spoken replies.
 - **The microphone can stay open with no Code Live UI on screen.** The page is kept alive when you leave its view, so Gemini keeps listening and can act on what it hears (approval still needs a spoken yes). The cues are `Code Live (running)` in code-conductor's switcher and the browser's recording indicator. Use **Pause mic** or **Disconnect** before leaving. Stop/Disable, or a Restart/Update from Settings → Plugins, ends the page and the call.
 - Use headphones: speaker audio can echo back into the microphone.
