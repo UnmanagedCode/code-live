@@ -23,8 +23,8 @@ const readsAsMarker = (line) => MARKER.test(line.normalize('NFKD').replace(COMBI
 // split() with a capture group alternates lines and the breaks between them.
 const safeBody = (text) => String(text).split(BREAK_SPLIT).map((part, i) => (i % 2 === 0 && readsAsMarker(part) ? `> ${part}` : part)).join('');
 
-// The line that ends an update whose plan is cut, pending or not.
-const planCutLine = (sessionId) => `The plan above is cut short: call read_conductor_plan with session ${sessionId} and read every part before summarizing it.`;
+// The line that ends an update whose text is cut: how to read it whole.
+const cutLine = (sessionId, keys) => `This update is cut short: read it whole with read_conductor_messages, session ${sessionId}, messageKey ${keys.map(oneLine).join(', then ')}, part 1 up to parts.`;
 
 // The line that ends an update whose turn stopped on a question or plan.
 function askFooter(ask, sessionId) {
@@ -48,7 +48,7 @@ export function installAnnouncements({ eventSource, transcript, session, hostInd
     if (!a) return;
     transcript.add('conductor', a.text, { title: a.title, ...(a.ask?.kind ? { ask: a.ask.kind } : {}) });
     const sessionId = oneLine(a.sessionId);
-    const footer = [askFooter(a.ask, sessionId), a.planTruncated ? planCutLine(sessionId) : ''].filter(Boolean).join('\n');
+    const footer = [askFooter(a.ask, sessionId), a.truncated && Array.isArray(a.messageKeys) && a.messageKeys.length ? cutLine(sessionId, a.messageKeys) : ''].filter(Boolean).join('\n');
     if (session.state === 'live') session.sendText(`${ANNOUNCE_PREFIX} from "${safeTitle(a.title)}" (session ${sessionId}):\n${safeBody(a.text)}${footer ? `\n${footer}` : ''}`);
   });
   eventSource.addEventListener('host', (ev) => {

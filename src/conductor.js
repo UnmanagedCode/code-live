@@ -2,10 +2,12 @@
 // conductor and resolves it against conductor rows only, so a worker session
 // can never be listed, read, prompted, answered or decided. Acting on a
 // conductor (create, send, answer, approve, reject) starts announcing it.
-import { assistantText, isConductor, latestAskEvent, latestPlanEvent, planParts, summarize, toolAsk, truncate, truncateBody, MAX_TEXT } from './hostEvents.js';
-import { pairMessages } from './hostMcp.js';
+import { askTurnEnd, hasSeq, isConductor, isTopLevel, latestAskEvent, summarize, textParts, toolAsk, truncateBody, MAX_TEXT } from './hostEvents.js';
+import { assembleMessages, bondedSelection, messageBody } from './eventMessages.js';
+import { readBack, readForward } from './eventPages.js';
 import { describeAnswers, resolveAnswers, remapQuestion } from './answerMapping.js';
 
+const CUT_HINT = 'Messages marked truncated are cut: read each whole with its messageKey, part 1 up to parts.';
 const REPLY_NOTE = 'The reply will be announced when the conductor finishes its turn.';
 const APPROVED_NOTE = 'The conductor is now running without permission prompts. Its reply will be announced when it finishes its turn.';
 const REJECTED_NOTE = 'The conductor will revise the plan. Its reply will be announced when it finishes its turn.';
@@ -59,14 +61,22 @@ export function createConductorService({ api, link, announcer, hostMcp }) {
       `"${summarize(row).title}" is not waiting for ${kind === 'question' ? 'an answer to a question' : 'approval of a plan'} right now.`);
   }
 
+  // The trailing page of the conductor's events.
+  async function eventsOf(id) {
+    const data = await api.getEvents(id);
+    return Array.isArray(data?.events) ? data.events : [];
+  }
+
   // A plan is approved or rejected only while the row shows an unanswered plan
-  // and the host's own latest messages hold it: the host does not check.
+  // and the conductor's events hold that plan with the turn that ended on it:
+  // the host does not check.
   async function requirePendingPlan(row) {
-    const sessionId = sessionOf(row);
+    sessionOf(row);
     requireAsk(row, 'plan');
-    const recent = await hostMcp.recentMessages(sessionId);
-    if (!pairMessages(recent).some((m) => m.hasPlan)) {
-      throw fail('NO_PENDING_PLAN', `"${summarize(row).title}" shows no plan in its latest messages, so there is nothing to approve or reject.`);
+    const events = await eventsOf(row.id);
+    const ev = latestAskEvent(events, 'plan');
+    if (!ev || !askTurnEnd(events, ev)) {
+      throw fail('NO_PENDING_PLAN', `"${summarize(row).title}" shows no plan in its latest events, so there is nothing to approve or reject.`);
     }
   }
 
@@ -120,36 +130,71 @@ export function createConductorService({ api, link, announcer, hostMcp }) {
     return { ok: true, sessionId: row.id, title: summarize(row).title, mode: out.mode, delivered: true, note };
   }
 
-  // The latest messages, or the /events prose when the host's MCP read fails.
-  async function readMessages(row, count) {
-    if (row.sessionId) {
-      try {
-        return pairMessages(await hostMcp.recentMessages(row.sessionId, { count })).map((m) => {
-          const body = truncateBody(m.text, MAX_TEXT);
-          return {
-            text: body.text,
-            ...(m.hasPlan ? { hasPlan: true } : {}),
-            ...(m.planPath ? { planPath: m.planPath } : {}),
-            ...(m.hasPlan && (m.planTruncated || m.text.length > MAX_TEXT) ? { planTruncated: true } : {}),
-            ...(m.questionCount !== undefined ? { questionCount: m.questionCount } : {}),
-            ...(body.cut ? { questionsTruncated: true } : {}),
-            ...(body.dropped ? { questionsDropped: true } : {}),
-          };
-        });
-      } catch (e) {
-        console.error('code-live: get_recent_messages failed, reading /events:', e.message);
-      }
-    } else {
-      console.error('code-live: the conductor has no host session id yet, reading /events');
-    }
-    const data = await api.getEvents(row.id);
-    const texts = (Array.isArray(data?.events) ? data.events : []).map(assistantText).filter(Boolean);
-    return texts.slice(-(count ?? 1)).map((t) => ({ text: truncate(t, MAX_TEXT) }));
+  // Whether the window's events let the default selection be settled: a
+  // top-level turn_end before the last message's start, so its whole turn is in.
+  function reachesTurnStart(events, last) {
+    return events.some((ev) => ev.kind === 'turn_end' && isTopLevel(ev) && ev._seq < last.firstSeq);
   }
 
-  const eventsOf = async (id) => {
-    const data = await api.getEvents(id);
-    return Array.isArray(data?.events) ? data.events : [];
+  function listed(m) {
+    const body = messageBody(m);
+    const fitted = truncateBody(body, MAX_TEXT);
+    return {
+      messageKey: m.key,
+      text: fitted.text,
+      totalChars: body.length,
+      ...(m.hasPlan ? { hasPlan: true } : {}),
+      ...(m.planPath ? { planPath: m.planPath } : {}),
+      ...(m.questions ? { questionCount: m.questions.length } : {}),
+      ...(fitted.cut ? { questionsTruncated: true } : {}),
+      ...(fitted.dropped ? { questionsDropped: true } : {}),
+      ...(fitted.text.length < body.length ? { truncated: true } : {}),
+    };
+  }
+
+  // Whether a message window holds enough settled messages for the request: more
+  // than `want` (the oldest may be cut at the page seam), and for the default
+  // selection its turn's start too.
+  const enoughFor = (want, byTurn) => (events) => {
+    const messages = assembleMessages(events);
+    if (messages.length <= want) return false;
+    return !byTurn || reachesTurnStart(events, messages.at(-1));
+  };
+
+  // The message listing. When the host reports older events than the window
+  // holds, the oldest message in it may be cut at the page seam and is not listed.
+  async function listMessages(row, { count, before }) {
+    const byTurn = count === undefined && !before;
+    const { events, complete } = await readBack(api, row.id, { before: before?.seq, enough: enoughFor(count ?? 1, byTurn) });
+    let messages = assembleMessages(events);
+    if (!complete) messages = messages.slice(1);
+    let picked;
+    if (count !== undefined) picked = messages.slice(-count);
+    else picked = before ? messages.slice(-1) : bondedSelection(messages);
+    const start = picked.length ? messages.indexOf(picked[0]) : 0;
+    const items = picked.map(listed);
+    return {
+      messages: items,
+      ...(items.some((m) => m.truncated) ? { hint: CUT_HINT } : {}),
+      ...(!complete || start > 0 ? { nextBefore: picked[0]?.key } : {}),
+    };
+  }
+
+  // A message's events are done once it is followed by a turn end or by another
+  // message, and every plan or question it asked has its event.
+  const messageDone = (msgId) => (events) => {
+    let mine = false;
+    let closed = false;
+    const asked = new Set();
+    for (const ev of events) {
+      if (!hasSeq(ev) || ev.parentToolUseId) continue;
+      if (ev.msgId === msgId) {
+        mine = true;
+        if (ev.kind === 'tool_use' && (ev.name === 'ExitPlanMode' || ev.name === 'AskUserQuestion') && typeof ev.toolUseId === 'string') asked.add(ev.toolUseId);
+      } else if (mine && (ev.kind === 'turn_end' || (typeof ev.msgId === 'string' && ev.msgId))) closed = true;
+      if ((ev.kind === 'plan_request' || ev.kind === 'user_question') && typeof ev.toolUseId === 'string') asked.delete(ev.toolUseId);
+    }
+    return closed && asked.size === 0;
   };
 
   return {
@@ -177,37 +222,40 @@ export function createConductorService({ api, link, announcer, hostMcp }) {
       return { ok: true, sessionId: row.id, title: summarize(row).title, delivered: true, note: REPLY_NOTE };
     },
 
-    // No `count` returns the host's default selection, which bonds a trailing
-    // prose message to the turn's plan or questions; an explicit `count` is
-    // literal, exactly as the host treats it.
-    async read({ session, count }) {
+    // No `count` returns the default selection, which bonds a trailing prose
+    // message to the turn's plan or questions; an explicit `count` is literal.
+    // `before` is a parsed message key: the messages before it.
+    async read({ session, count, before }) {
       const row = await resolve(session);
-      return { ok: true, sessionId: row.id, title: summarize(row).title, messages: await readMessages(row, count) };
+      return { ok: true, sessionId: row.id, title: summarize(row).title, ...await listMessages(row, { count, before }) };
     },
 
-    // The whole plan of the conductor's newest plan_request (pending or not), one part at a
-    // time, from the events route: the host's message bodies cap a plan.
-    async readPlan({ session, part }) {
+    // One message whole, a part at a time, from the events after its first
+    // event. A key whose seq no longer starts that message is refused: a respawn
+    // renumbers the stream and keeps only the msgId.
+    async readMessage({ session, messageKey, part }) {
       const row = await resolve(session);
       const title = summarize(row).title;
-      const ev = latestPlanEvent(await eventsOf(row.id));
-      if (!ev) throw fail('NO_PLAN', `"${title}" has no plan in its recent events.`);
-      const planPath = typeof ev.planPath === 'string' && ev.planPath ? ev.planPath : null;
-      if (typeof ev.plan !== 'string' || ev.plan === '') {
-        throw fail('NO_PLAN', `"${title}"'s plan text is unavailable${planPath ? ` (code-conductor could not read ${planPath})` : ''}.`);
+      const events = await readForward(api, row.id, { after: messageKey.seq - 1, done: messageDone(messageKey.msgId) });
+      const [m] = assembleMessages(events);
+      if (!m || m.msgId !== messageKey.msgId || m.firstSeq !== messageKey.seq) {
+        throw fail('MESSAGE_NOT_FOUND', `No message ${messageKey.seq}-${messageKey.msgId} in "${title}" any more; list the messages again with read_conductor_messages.`);
       }
-      const parts = planParts(ev.plan);
-      if (part > parts.length) throw fail('NO_SUCH_PART', `The plan has ${parts.length} part(s).`, { expected: parts.length, got: part });
+      const body = messageBody(m);
+      const parts = textParts(body);
+      if (part > parts.length) throw fail('NO_SUCH_PART', `The message has ${parts.length} part(s).`, { expected: parts.length, got: part });
       return {
         ok: true,
         sessionId: row.id,
         title,
-        awaitingApproval: toolAsk(row) === 'plan',
-        planPath,
+        messageKey: m.key,
         part,
         parts: parts.length,
-        totalChars: ev.plan.length,
+        totalChars: body.length,
         text: parts[part - 1],
+        ...(m.hasPlan ? { hasPlan: true } : {}),
+        ...(m.planPath ? { planPath: m.planPath } : {}),
+        ...(m.questions ? { questionCount: m.questions.length } : {}),
       };
     },
 

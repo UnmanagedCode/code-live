@@ -15,8 +15,8 @@ import { createKeyStore } from '../src/keyStore.js';
 import { callTool } from '../src/tools.js';
 import { resolveAnswers, dropParenthetical } from '../src/answerMapping.js';
 import { createConductorService } from '../src/conductor.js';
-import { planParts, truncateBody, truncate, renderQuestions, renderPlan, assistantText, summarize, MAX_TEXT } from '../src/hostEvents.js';
-import { pairMessages } from '../src/hostMcp.js';
+import { textParts, truncateBody, truncate, renderQuestions, renderPlan, assistantText, summarize, MAX_TEXT } from '../src/hostEvents.js';
+import { assembleMessages, bondedSelection, messageBody, parseMessageKey } from '../src/eventMessages.js';
 import { createGemini } from '../src/gemini.js';
 import { installAnnouncements } from '../frontend/src/lib/announcements.js';
 import { createTranscriptStore } from '../frontend/src/lib/transcriptStore.js';
@@ -24,9 +24,12 @@ import { createLiveSession } from '../frontend/src/lib/liveSession.js';
 import { tempDir, SENTINEL_KEY } from './helpers.mjs';
 
 const SIZES = [10_000, 20_000, 40_000, 80_000];
+// assembleMessages allocates an object per message, so past about 40k events garbage collection adds a cost that grows
+// with the heap; these sizes stay where the per-event cost is flat, and a quadratic still shows at them.
+const EVENT_SIZES = [5_000, 10_000, 20_000, 40_000];
 const BODY_SIZES = [8_192, 16_384, 32_768, 65_536]; // readJsonBody refuses more than 64 KB
-// planParts is under a millisecond at SIZES, so a quadratic scan only shows at plan-sized inputs.
-const PLAN_SIZES = [1_000_000, 2_000_000, 4_000_000];
+// textParts is under a millisecond at SIZES, so a quadratic scan only shows at plan-sized inputs.
+const PART_SIZES = [1_000_000, 2_000_000, 4_000_000];
 const LIMIT_MS = 250;
 const MEASURABLE_MS = 5;
 const MAX_RATIO = 3; // a quadratic grows about 4x per doubling
@@ -129,12 +132,12 @@ test('host events: reply truncation, rendering and text extraction', async () =>
     'fence-like lines': (n) => `--- questions --\n`.repeat(n / 17) + fence,
   };
   for (const [name, make] of Object.entries(shapes)) await assertLinear(`truncateBody ${name}`, make, (s) => truncateBody(s, MAX_TEXT));
-  const planShapes = {
+  const partShapes = {
     'one long line': (n) => 'x'.repeat(n),
     'all newlines': (n) => '\n'.repeat(n),
     'newline every ~100 chars': (n) => `${'x'.repeat(99)}\n`.repeat(n / 100),
   };
-  for (const [name, make] of Object.entries(planShapes)) await assertLinear(`planParts ${name}`, make, (s) => planParts(s), PLAN_SIZES);
+  for (const [name, make] of Object.entries(partShapes)) await assertLinear(`textParts ${name}`, make, (s) => textParts(s), PART_SIZES);
   await assertLinear('truncate', (n) => 'x'.repeat(n), (s) => truncate(s, MAX_TEXT));
   await assertLinear('renderQuestions', (n) => Array.from({ length: n / 20 }, (_, i) => ({ question: `q${i}`, header: 'h', options: [{ label: 'l', description: 'd' }] })), renderQuestions);
   await assertLinear('renderPlan', (n) => ({ planPath: 'p'.repeat(n), plan: 'x\n'.repeat(n) }), renderPlan);
@@ -142,18 +145,29 @@ test('host events: reply truncation, rendering and text extraction', async () =>
   await assertLinear('summarize', (n) => ({ id: 'c', title: '', firstPrompt: 'x'.repeat(n) }), summarize);
 });
 
-test('host /mcp bodies: message boundaries and the joined announcement text', async () => {
+test('events: message assembly, selection, body rendering and key parsing', async () => {
+  const text = (msgId, t, extra = {}) => ({ kind: 'assistant_message', msgId, message: { content: [{ type: 'text', text: t }] }, ...extra });
+  const seq = (events) => events.map((ev, i) => ({ ...ev, _seq: i + 1 }));
   const shapes = {
-    'boundary with no tail': (n) => '--- message 1/1 · ' + 'x'.repeat(n),
-    'boundary tail repeated': (n) => '--- message 1/1 · ' + ' chars --'.repeat(n / 9),
-    'digit runs': (n) => '--- message ' + '1'.repeat(n / 2) + '/' + '1'.repeat(n / 2),
+    'one message of many tiny deltas': (n) => seq(Array.from({ length: n }, () => ({ kind: 'text_delta', msgId: 'm', blockIdx: 0, text: 'ab' }))),
+    'many one-delta messages': (n) => seq(Array.from({ length: n }, (_, i) => ({ kind: 'text_delta', msgId: `m${i}`, blockIdx: 0, text: 'ab' }))),
+    'many turns of one message': (n) => seq(Array.from({ length: n }, (_, i) => (i % 2 ? { kind: 'turn_end' } : text(`m${i}`, 'x')))),
+    'one huge envelope text': (n) => seq([text('m', 'x'.repeat(n * 10))]),
+    'many text blocks in one envelope': (n) => seq([{ kind: 'assistant_message', msgId: 'm', message: { content: Array.from({ length: n }, () => ({ type: 'text', text: 'ab' })) } }]),
+    'plan_requests that match no tool_use': (n) => seq([text('m', 'x'), ...Array.from({ length: n }, (_, i) => ({ kind: 'plan_request', toolUseId: `none${i}`, plan: 'p' }))]),
+    'narration blocks': (n) => seq(Array.from({ length: n }, (_, i) => ({ kind: 'thinking_delta', msgId: 'm', blockIdx: i, narration: true, text: ' step ' }))),
   };
-  for (const [name, make] of Object.entries(shapes)) {
-    await assertLinear(`pairMessages ${name}`, (n) => ({ meta: { messages: [{ msgId: 'm' }] }, bodies: [make(n)] }), (x) => pairMessages(x));
-  }
-  // What the announcer composes: the paired texts joined, then fitted.
-  await assertLinear('announcement compose', (n) => ({ meta: { messages: Array.from({ length: n / 20 }, (_, i) => ({ msgId: `m${i}` })) }, bodies: Array.from({ length: n / 20 }, () => '--- message 1/2 · 9 chars ---\nabc\n') }),
-    (x) => truncateBody(pairMessages(x).map((m) => m.text).filter(Boolean).join('\n'), MAX_TEXT));
+  const run = (events) => {
+    const messages = assembleMessages(events);
+    return truncateBody(bondedSelection(messages).map(messageBody).join('\n'), MAX_TEXT);
+  };
+  for (const [name, make] of Object.entries(shapes)) await assertLinear(`assembleMessages ${name}`, make, run, EVENT_SIZES);
+  const keys = {
+    'digits only': (n) => '1'.repeat(n),
+    'digits then dash': (n) => `${'1'.repeat(14)}-${'m'.repeat(n)}`,
+    'dashes only': (n) => '-'.repeat(n),
+  };
+  for (const [name, make] of Object.entries(keys)) await assertLinear(`parseMessageKey ${name}`, make, parseMessageKey);
 });
 
 test('upstream Gemini error bodies: key scrubbing', async () => {

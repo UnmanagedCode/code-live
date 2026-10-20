@@ -3,8 +3,8 @@
 
 export const CONDUCTOR_PROJECT = '.conduct';
 export const MAX_TEXT = 4000;
-// The most plan text one read_conductor_plan result carries.
-export const PLAN_PART_CHARS = 12000;
+// The most text one paged read of a message carries.
+export const PART_CHARS = 12000;
 
 export function isConductor(inst) {
   return !!inst && inst.project === CONDUCTOR_PROJECT;
@@ -61,13 +61,13 @@ export function truncateBody(text, max) {
   return { text: kept.join('\n'), cut: true, dropped: true };
 }
 
-// Splits a plan into parts of at most `size` chars whose concatenation is
+// Splits a message body into parts of at most `size` chars whose concatenation is
 // exactly `text`. A part breaks after a newline when one lies in the back half
-// of its window, so parts read back as the plan's own lines; otherwise it is
+// of its window, so parts read back as the body's own lines; otherwise it is
 // cut at `size`. The backward newline scan stops at the middle of its window
 // (a part is at least half of `size`, so the work per part is bounded by the
 // part's own length): linear in the text.
-export function planParts(text, size = PLAN_PART_CHARS) {
+export function textParts(text, size = PART_CHARS) {
   const parts = [];
   let start = 0;
   while (start < text.length) {
@@ -134,17 +134,16 @@ export function summarize(inst) {
 }
 
 // The text blocks of a top-level assistant_message event (sub-agent messages
-// carry parentToolUseId and are not the conductor's) joined with newlines, or ''
-// for anything else (including tool-use-only messages).
+// carry parentToolUseId and are not the conductor's) joined with '', as the host
+// joins them, or '' for anything else (including tool-use-only messages).
 export function assistantText(ev) {
   if (!ev || ev.kind !== 'assistant_message' || ev.parentToolUseId) return '';
   const content = ev.message?.content;
   if (!Array.isArray(content)) return '';
-  const text = content
+  return content
     .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
     .map((b) => b.text)
-    .join('\n');
-  return text.trim() === '' ? '' : text;
+    .join('');
 }
 
 export function hasSeq(ev) {
@@ -184,15 +183,6 @@ export function latestAskEvent(events, kind) {
   for (let i = events.length - 1; i >= 0; i--) {
     const ev = events[i];
     if (ev.kind === want && isTopLevel(ev) && !ev.autoApproved && (kind !== 'question' || Array.isArray(ev.questions))) return ev;
-  }
-  return null;
-}
-
-// The newest top-level plan_request, auto-approved or not: the plan a
-// conductor most recently produced, whether or not it is still pending.
-export function latestPlanEvent(events) {
-  for (let i = events.length - 1; i >= 0; i--) {
-    if (events[i].kind === 'plan_request' && isTopLevel(events[i])) return events[i];
   }
   return null;
 }

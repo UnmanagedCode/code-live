@@ -45,7 +45,7 @@ test('a turn_notification for an announced conductor announces its last text rep
   const end = host.addEvent('cond-a', { kind: 'turn_end', isError: false });
   host.broadcast({ t: 'turn_notification', id: 'cond-a', project: '.conduct', isError: false });
   const ev = await sse.next('announce');
-  assert.deepEqual(ev.data, { sessionId: 'cond-a', title: 'Alpha plan', text: 'Done: \nall green', turnSeq: end._seq, isError: false, ask: null });
+  assert.deepEqual(ev.data, { sessionId: 'cond-a', title: 'Alpha plan', text: 'Done: all green', turnSeq: end._seq, isError: false, ask: null });
   assert.match(ev.id, /^[0-9a-f]+-\d+$/);
   assert.equal(cursor(app).lastHandledTurnSeq, end._seq);
 });
@@ -215,15 +215,15 @@ test('a persisted worker id in the announced set is never read and is pruned', a
   assert.ok(!host.requests.some((q) => q.url.startsWith('/api/instances/worker-1/')), 'no event read for the worker');
 });
 
+// Invariant: the text is assembled from the events of the announced turn only, so a later turn that has started
+// speaking never leaks into it.
 test('the announced text is the reply before the turn_end, not the next turn\'s', async (t) => {
   const { host, app, sse } = await setup(t);
-  const logged = t.mock.method(console, 'error', () => {});
   host.addEvent('cond-a', { ...reply('reply to turn one'), msgId: 'msg-one' });
   const end = host.addEvent('cond-a', { kind: 'turn_end', isError: false });
   host.addEvent('cond-a', { ...reply('turn two already talking'), msgId: 'msg-two' });
   await app.deps.announcer.reconcile();
   const ev = await sse.next('announce');
-  assert.ok(logged.mock.calls.some((c) => /later turn has spoken/.test(String(c.arguments[0]))), 'the stale-turn fallback is logged');
   assert.equal(ev.data.text, 'reply to turn one');
   assert.equal(ev.data.turnSeq, end._seq);
 });
@@ -234,7 +234,6 @@ const QUESTIONS = [
   { question: 'Which database?', header: 'DB', multiSelect: false, options: [{ label: 'Postgres (Recommended)', description: 'robust' }, { label: 'SQLite', description: 'tiny: embedded' }] },
   { question: 'Which checks?', header: 'Checks', multiSelect: true, options: [{ label: 'Lint', description: 'style' }, { label: 'Test', description: 'unit' }] },
 ];
-const mcpReads = (host) => host.mcpCalls.filter((c) => c.name === 'get_recent_messages');
 const announces = (sse) => sse.events.filter((e) => e.event === 'announce').map((e) => e.data);
 // Waits until everything published so far has been received.
 async function settle(app, sse) {
@@ -249,8 +248,8 @@ test('a turn ending on AskUserQuestion announces its questions with every option
   assert.equal(ev.data.turnSeq, end._seq);
   assert.deepEqual(ev.data.ask, { kind: 'question', count: 2 });
   assert.match(ev.data.text, /^Two quick things\.\n--- questions ---\n1\. Which database\? \(multiSelect: false\) · header: DB\n   - Postgres \(Recommended\): robust\n   - SQLite: tiny: embedded\n2\. Which checks\? \(multiSelect: true\) · header: Checks\n   - Lint: style\n   - Test: unit$/);
-  assert.deepEqual(mcpReads(host).map((c) => c.arguments), [{ sessionId: 's-a' }], 'read by the host session id, with no count');
-  assert.equal(cursor(app).lastHandledMsgId, `m${end._seq - 2}`);
+  assert.equal(host.mcpCalls.length, 0, 'announcing reads over REST only');
+  assert.equal(cursor(app).lastHandledMsgId, `m${end._seq - 7}`);
 });
 
 test('a turn ending on ExitPlanMode announces the plan with ask.planPath', async (t) => {
@@ -264,71 +263,89 @@ test('a turn ending on ExitPlanMode announces the plan with ask.planPath', async
   assert.deepEqual(inline.data.ask, { kind: 'plan', planPath: null });
 });
 
-// Invariant: a plan cut at the announcement cap is flagged planTruncated, never cut silently.
-test('a pending plan over MAX_TEXT is announced with planTruncated', async (t) => {
-  const { host, sse } = await setup(t);
-  host.finishAsk('cond-a', { kind: 'plan', plan: 'line\n'.repeat(2000), planPath: '/plans/big.md', prose: 'Big plan.' });
-  const ev = await sse.next('announce');
-  assert.deepEqual(ev.data.ask, { kind: 'plan', planPath: '/plans/big.md' });
-  assert.equal(ev.data.planTruncated, true);
-  assert.ok(ev.data.text.length <= 4000);
+// The whole text of a message, paged back through read_conductor_messages by its key.
+async function readWhole(app, key, session = 'cond-a') {
+  const first = await callTool(app, 'read_conductor_messages', { session, messageKey: key });
+  assert.equal(first.ok, true, JSON.stringify(first));
+  let text = first.text;
+  for (let part = 2; part <= first.parts; part++) text += (await callTool(app, 'read_conductor_messages', { session, messageKey: key, part })).text;
+  return text;
+}
+
+const BIG_PLAN = Array.from({ length: 1500 }, (_, i) => `${i + 1}. step number ${i + 1} of the plan`).join('\n') + '\nLAST-LINE-UNIQUE';
+
+// Invariant: an announcement over MAX_TEXT is published cut, with truncated:true and the messageKeys that page the
+// message back whole, for a pending plan, an auto-approved plan and long prose alike; it needs no /mcp call.
+test('a cut announcement carries truncated and the messageKeys that read it whole', async (t) => {
+  const { host, app, sse } = await setup(t);
+  host.finishAsk('cond-a', { kind: 'plan', plan: BIG_PLAN, planPath: '/plans/big.md', prose: 'Big plan.' });
+  const pending = (await sse.next('announce')).data;
+  assert.deepEqual(pending.ask, { kind: 'plan', planPath: '/plans/big.md' });
+  assert.equal(pending.truncated, true);
+  assert.ok(pending.text.length <= 4000);
+  assert.equal(pending.messageKeys.length, 1);
+  assert.equal(await readWhole(app, pending.messageKeys[0]), `Big plan.\n--- plan · saved to /plans/big.md ---\n${BIG_PLAN}`);
+
+  host.finishAsk('cond-a', { kind: 'plan', plan: BIG_PLAN, prose: 'Auto plan.', row: { awaitingUser: null, awaitingUserSource: null } });
+  const auto = (await sse.next('announce', (d) => d.text.startsWith('Auto plan.'))).data;
+  assert.equal(auto.ask, null);
+  assert.equal(auto.truncated, true);
+  assert.equal(await readWhole(app, auto.messageKeys[0]), `Auto plan.\n--- plan ---\n${BIG_PLAN}`);
+
+  const prose = 'word '.repeat(6000);
+  host.finishTurn('cond-a', prose);
+  const long = (await sse.next('announce', (d) => d.text.startsWith('word'))).data;
+  assert.equal(long.truncated, true);
+  assert.equal(await readWhole(app, long.messageKeys[0]), prose);
+  assert.equal(host.mcpCalls.length, 0, 'announcing reads over REST only');
 });
 
-// Invariant: the flag does not depend on the plan being pending (auto-approved, or decided elsewhere).
-test('an auto-approved plan over MAX_TEXT is announced with planTruncated and no ask', async (t) => {
-  const { host, sse } = await setup(t);
-  host.finishAsk('cond-a', { kind: 'plan', plan: 'line\n'.repeat(2000), prose: 'Auto plan.', row: { awaitingUser: null, awaitingUserSource: null } });
-  const ev = await sse.next('announce');
-  assert.equal(ev.data.ask, null);
-  assert.equal(ev.data.planTruncated, true);
-  assert.ok(ev.data.text.length <= 4000);
+// Invariant: a plan file read by the host (the plan only on the plan_request, not in the tool input) is announced whole-able too.
+test('a cut plan that sits only on its plan_request is announced with truncated', async (t) => {
+  const { host, app, sse } = await setup(t);
+  host.finishAsk('cond-a', { kind: 'plan', plan: BIG_PLAN, planPath: '/plans/file.md', inputPlan: false });
+  const ev = (await sse.next('announce')).data;
+  assert.equal(ev.truncated, true);
+  assert.ok((await readWhole(app, ev.messageKeys[0])).endsWith('LAST-LINE-UNIQUE'));
 });
 
-// Invariant: the host's own planTruncated flag reaches the announcement even when the body is short.
-test("the host's planTruncated flag on a short body is announced as planTruncated", async (t) => {
+// Invariant: a pending plan announced from its own turn, behind a later turn, is cut-flagged the same way.
+test('a cut pending plan behind a later turn is announced with truncated', async (t) => {
   const { host, sse } = await setup(t);
-  host.setMcp('get_recent_messages', () => ({ content: [
-    { type: 'text', text: JSON.stringify({ messages: [{ msgId: 'm1', hasPlan: true, planTruncated: true }] }) },
-    { type: 'text', text: '--- plan ---\nshortened by the host' },
-  ] }));
-  host.finishTurn('cond-a', 'placeholder');
-  const ev = await sse.next('announce');
-  assert.equal(ev.data.planTruncated, true);
-  assert.ok(ev.data.text.length < 4000);
-});
-
-// Invariant: a plan over MAX_TEXT rendered from its own plan_request event (the /mcp read failed) is flagged
-// planTruncated and its text stays within MAX_TEXT.
-test('a cut plan rendered from its event, with the /mcp read failing, is announced with planTruncated', async (t) => {
-  const { host, sse } = await setup(t);
-  t.mock.method(console, 'error', () => {});
-  host.setMcp('get_recent_messages', () => mcpThrown('unavailable'));
-  host.finishAsk('cond-a', { kind: 'plan', plan: 'line\n'.repeat(2000), planPath: '/plans/big.md', prose: 'Big plan.' });
-  const ev = await sse.next('announce');
-  assert.deepEqual(ev.data.ask, { kind: 'plan', planPath: '/plans/big.md' });
-  assert.equal(ev.data.planTruncated, true);
-  assert.ok(ev.data.text.length <= 4000);
-  assert.ok(ev.data.text.includes('--- plan · saved to /plans/big.md ---'), 'the plan came from the event');
-});
-
-// Invariant: the same holds for a pending plan announced from its own event behind a later turn.
-test('a cut pending plan behind a later turn is announced with planTruncated', async (t) => {
-  const { host, sse } = await setup(t);
-  askThenLaterTurn(host, { kind: 'plan', plan: 'line\n'.repeat(2000), planPath: '/plans/big.md', prose: 'Plan below.' });
+  askThenLaterTurn(host, { kind: 'plan', plan: BIG_PLAN, planPath: '/plans/big.md', prose: 'Plan below.' });
   host.broadcast({ t: 'instances', instances: host.state.instances });
-  const ev = await sse.next('announce');
-  assert.equal(ev.data.ask.kind, 'plan');
-  assert.equal(ev.data.planTruncated, true);
-  assert.ok(ev.data.text.length <= 4000);
+  const ev = (await sse.next('announce')).data;
+  assert.equal(ev.ask.kind, 'plan');
+  assert.equal(ev.truncated, true);
+  assert.ok(ev.text.length <= 4000);
+  assert.equal(ev.messageKeys.length, 1);
 });
 
-// Invariant: a short plan, and a long reply with no plan, are not flagged.
-test('no planTruncated for a short plan or a long plan-free reply', async (t) => {
+// Invariant: a short plan and a short reply carry neither truncated nor messageKeys.
+test('a short announcement carries no truncated and no messageKeys', async (t) => {
   const { host, sse } = await setup(t);
   host.finishAsk('cond-a', { kind: 'plan', plan: 'Step 1', prose: 'Short.' });
-  assert.equal('planTruncated' in (await sse.next('announce')).data, false);
-  host.finishTurn('cond-a', 'word '.repeat(2000));
-  assert.equal('planTruncated' in (await sse.next('announce', (d) => d.text.startsWith('word'))).data, false);
+  const plan = (await sse.next('announce')).data;
+  assert.deepEqual([plan.truncated, plan.messageKeys], [undefined, undefined]);
+  host.finishTurn('cond-a', 'short reply');
+  const reply = (await sse.next('announce', (d) => d.text === 'short reply')).data;
+  assert.deepEqual([reply.truncated, reply.messageKeys], [undefined, undefined]);
+});
+
+// Invariant: a turn that began beyond one events page is announced from all of its own messages: the reconcile reads
+// older pages until it reaches the turn's start, and the turn's plan message is bonded to its trailing prose.
+test('a turn wider than one events page is announced from its own messages', async (t) => {
+  const { host, sse } = await setup(t);
+  const msgId = 'plan-msg';
+  host.addEvent('cond-a', { kind: 'message_start', msgId });
+  host.addEvent('cond-a', { kind: 'text_delta', msgId, blockIdx: 0, text: 'Plan message.' });
+  host.addEvent('cond-a', { kind: 'tool_use', msgId, blockIdx: 1, toolUseId: 'tuP', name: 'ExitPlanMode', input: { plan: 'Plan body' } });
+  host.addEvent('cond-a', { kind: 'plan_request', toolUseId: 'tuP', plan: 'Plan body', planPath: null });
+  for (let i = 0; i < 600; i++) host.addEvent('cond-a', { kind: 'tool_use', msgId: `work${i}`, toolUseId: `w${i}`, name: 'Bash', input: {} });
+  host.finishTurn('cond-a', 'The closing words.');
+  const ev = (await sse.next('announce')).data;
+  assert.equal(ev.text, 'Plan message.\n--- plan ---\nPlan body\nThe closing words.');
+  assert.ok(host.requests.some((q) => q.url.startsWith('/api/instances/cond-a/events') && q.url.includes('before=')), 'an older page was read');
 });
 
 test('no ask is reported when the row shows no unanswered tool ask (auto-approved, answered, or prose-only)', async (t) => {
@@ -363,30 +380,32 @@ test('a suppressed turn without an ask stays silent on instances frames', async 
   await app.deps.announcer.reconcileAsk();
   await settle(app, sse);
   assert.deepEqual(announces(sse), []);
-  assert.equal(mcpReads(host).length, 0, 'nothing was read');
+  assert.equal(host.mcpCalls.length, 0, 'nothing was read');
   assert.equal(host.requests.filter((q) => q.url.startsWith('/api/instances/cond-a/events')).length, 0);
   assert.equal(cursor(app).lastHandledTurnSeq, -1, 'state untouched');
 });
 
-test('a burst of instances frames costs one MCP read', async (t) => {
+// Invariant: a burst of instances frames announces the ask once and never calls /mcp.
+test('a burst of instances frames announces once and makes no /mcp call', async (t) => {
   const { host, app, sse } = await setup(t);
   host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, notify: false });
   for (let i = 0; i < 6; i++) host.broadcast({ t: 'instances', instances: host.state.instances });
   await sse.next('announce');
   await app.deps.announcer.reconcileAsk();
   await settle(app, sse);
-  assert.equal(mcpReads(host).length, 1);
+  assert.equal(host.mcpCalls.length, 0);
   assert.equal(announces(sse).length, 1);
 });
 
-test('a notified ask turn is read once even though an instances frame arrives too', async (t) => {
+// Invariant: a notified ask turn is announced once even though an instances frame arrives too, with no /mcp call.
+test('a notified ask turn is announced once even though an instances frame arrives too', async (t) => {
   const { host, app, sse } = await setup(t);
   host.finishAsk('cond-a', { kind: 'plan', plan: 'p', planPath: '/p.md' });
   await sse.next('announce');
   await app.deps.announcer.reconcileAsk();
   await settle(app, sse);
   assert.equal(announces(sse).length, 1);
-  assert.equal(mcpReads(host).length, 1);
+  assert.equal(host.mcpCalls.length, 0);
 });
 
 test('an ask whose turn has not ended is not announced early, then is once the turn ends', async (t) => {
@@ -405,22 +424,9 @@ test('an ask whose turn has not ended is not announced early, then is once the t
   assert.deepEqual(ev.data.ask, { kind: 'question', count: 2 });
 });
 
-test('when the MCP read fails the text falls back to /events, logged, and the pending ask is rendered from its own event', async (t) => {
+// Invariant: announcing needs only the events route, so a conductor with no host session id yet is still announced.
+test('a conductor with no host session id yet is announced from its events', async (t) => {
   const { host, sse } = await setup(t);
-  const logged = t.mock.method(console, 'error', () => {});
-  host.setMcp('get_recent_messages', () => ({ content: [{ type: 'text', text: 'boom' }], isError: true }));
-  host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, prose: 'Fallback prose.' });
-  const ev = await sse.next('announce');
-  assert.match(ev.data.text, /^Fallback prose\.\n--- questions ---\n1\. Which database\?/, 'the events prose plus the questions rendered from the user_question event');
-  assert.deepEqual(ev.data.ask, { kind: 'question', count: 2 });
-  assert.ok(logged.mock.calls.some((c) => /get_recent_messages failed/.test(String(c.arguments[0]))), 'the degradation is logged');
-  host.finishTurn('cond-a', 'plain after failure');
-  assert.equal((await sse.next('announce', (d) => d.text === 'plain after failure')).data.ask, null);
-});
-
-test('a conductor with no host session id yet falls back to /events', async (t) => {
-  const { host, sse } = await setup(t);
-  t.mock.method(console, 'error', () => {});
   host.setRow('cond-a', { sessionId: null });
   host.finishTurn('cond-a', 'spawned fast');
   assert.equal((await sse.next('announce')).data.text, 'spawned fast');
@@ -444,10 +450,10 @@ test('a host ring reset replays nothing, and the next turn is announced', async 
   await app.deps.announcer.reconcile();
   await settle(app, sse);
   assert.equal(announces(sse).length, 1, 'the replayed turn is not announced again');
-  assert.equal(cursor(app).lastHandledTurnSeq, 4, 'the handled seq follows the renumbering');
+  assert.equal(cursor(app).lastHandledTurnSeq, 10, 'the handled seq follows the renumbering');
   assert.equal(cursor(app).lastHandledMsgId, handled.lastHandledMsgId);
   host.finishTurn('cond-a', 'turn three');
-  assert.equal((await sse.next('announce', (d) => d.text === 'turn three')).data.turnSeq, 6);
+  assert.equal((await sse.next('announce', (d) => d.text === 'turn three')).data.turnSeq, 15);
 });
 
 test('a replayed turn is silent even when its new _seq is higher than the handled one', async (t) => {
@@ -471,7 +477,7 @@ test('a turn that said nothing is announced even after an announced turn', async
   host.addEvent('cond-a', { kind: 'turn_end', isError: true });
   host.broadcast({ t: 'turn_notification', id: 'cond-a' });
   const ev = await sse.next('announce', (d) => d.isError);
-  assert.equal(ev.data.turnSeq, 3);
+  assert.equal(ev.data.turnSeq, 6);
 });
 
 test('a long reply keeps the questions whole and cuts the prose before them', async (t) => {
@@ -491,7 +497,7 @@ test('watching a conductor records the msgId of its last finished turn; watching
   host.finishTurn('cond-b', 'newer', { notify: false });
   await app.deps.announcer.watch('cond-b');
   assert.equal(cursor(app, 'cond-b').lastHandledMsgId, 'old-msg', 'a second watch does not re-baseline');
-  assert.equal(mcpReads(host).length, 0);
+  assert.equal(host.mcpCalls.length, 0);
 });
 
 // ---- a pending ask that is not the newest turn ----
@@ -621,18 +627,8 @@ test('asks pending on two announced conductors are both announced from one insta
 
 test('two announced conductors each get their turns announced with their own session id', async (t) => {
   const { host, app, sse } = await setup(t, { watch: ['cond-a', 'cond-b'] });
-  // A's announcement is held open while both turns finish.
-  let release;
-  const held = new Promise((r) => { release = r; });
-  host.setMcp('get_recent_messages', async (args) => {
-    if (args.sessionId === 's-a') await held;
-    return mcpThrown('unavailable');
-  });
-  t.mock.method(console, 'error', () => {});
   host.finishTurn('cond-a', 'from alpha');
-  await waitFor(() => host.mcpCalls.some((c) => c.arguments.sessionId === 's-a'), { what: 'A\'s message read to start' });
   host.finishTurn('cond-b', 'from beta');
-  release();
   await sse.next('announce', (d) => d.sessionId === 'cond-b');
   await settle(app, sse);
   const got = announces(sse);
@@ -768,7 +764,6 @@ test('a legacy state.json with an active target announces nothing', async (t) =>
 
 test('a sub-agent message between the question and turn_end does not change the turn\'s msgId or text', async (t) => {
   const { host, app, sse } = await setup(t);
-  const logged = t.mock.method(console, 'error', () => {});
   host.addEvent('cond-a', { kind: 'assistant_message', msgId: 'main-1', message: { content: [{ type: 'text', text: 'Two quick things.' }] } });
   host.addEvent('cond-a', { kind: 'user_question', toolUseId: 'toolu_q', questions: QUESTIONS });
   host.addEvent('cond-a', { kind: 'assistant_message', msgId: 'sub-1', parentToolUseId: 'toolu_task', message: { content: [{ type: 'text', text: 'sub-agent chatter' }] } });
@@ -781,7 +776,6 @@ test('a sub-agent message between the question and turn_end does not change the 
   assert.match(ev.data.text, /^Two quick things\.\n--- questions ---/, 'the host\'s own rendering, so the stale-turn guard accepted it');
   assert.deepEqual(ev.data.ask, { kind: 'question', count: 2 });
   assert.equal(cursor(app).lastHandledMsgId, 'main-1');
-  assert.ok(!logged.mock.calls.some((c) => /later turn has spoken/.test(String(c.arguments[0]))), 'no stale-turn fallback');
 });
 
 test('a sub-agent turn_end is not a turn of the conductor', async (t) => {
@@ -798,7 +792,7 @@ test('a sub-agent turn_end is not a turn of the conductor', async (t) => {
 
 // ---- latching ----
 
-test('an unchanged ask state costs one events read and one MCP read, however many instances frames follow', async (t) => {
+test('an unchanged ask state costs one events read, however many instances frames follow', async (t) => {
   const { host, app, sse } = await setup(t);
   host.requests.length = 0;
   host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, notify: false });
@@ -806,11 +800,9 @@ test('an unchanged ask state costs one events read and one MCP read, however man
   await sse.next('announce');
   await app.deps.announcer.reconcileAsk();
   assert.equal(eventReads(host), 1);
-  assert.equal(mcpReads(host).length, 1);
   const lists = listReads(host);
   for (let i = 0; i < 5; i++) await app.deps.announcer.reconcileAsk();
   assert.equal(eventReads(host), 1, 'later frames read only the instance list');
-  assert.equal(mcpReads(host).length, 1);
   assert.equal(listReads(host), lists + 5);
   assert.equal(announces(sse).length, 1);
 });
@@ -822,7 +814,6 @@ test('a row ask with no matching event settles after one probe; a new ask state 
   host.setRow('cond-a', { awaitingUser: 'plan', awaitingUserSource: 'tool', lastResponseAt: 50 });
   for (let i = 0; i < 4; i++) await app.deps.announcer.reconcileAsk();
   assert.equal(eventReads(host), 1);
-  assert.equal(mcpReads(host).length, 0);
   // A different ask state is probed, and a real ask is then announced.
   host.finishAsk('cond-a', { kind: 'question', questions: QUESTIONS, notify: false, frames: false });
   await app.deps.announcer.reconcileAsk();
@@ -872,8 +863,6 @@ test('a malformed user_question payload is announced without throwing or rejecti
   const { host, sse } = await setup(t);
   const rejections = watchRejections(t);
   t.mock.method(console, 'error', () => {});
-  // The event is what the announcer renders when the host's own rendering is unavailable.
-  host.setMcp('get_recent_messages', () => ({ content: [{ type: 'text', text: 'unavailable' }], isError: true }));
   host.finishAsk('cond-a', { kind: 'question', questions: [{ question: 'Pick?', options: [null, { label: 'A' }, 7] }, null], prose: 'Odd payload.' });
   const ev = await sse.next('announce');
   assert.deepEqual(ev.data.ask, { kind: 'question', count: 2 });

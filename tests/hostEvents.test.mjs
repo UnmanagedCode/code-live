@@ -3,7 +3,7 @@
 // tool-sourced question/plan, and a turn's msgId is scoped to that turn.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { truncateBody, toolAsk, lastAssistantMsgId, assistantText, newestTurnEnd, latestAskEvent, askTurnEnd, askId, renderQuestions, renderPlan, planParts, latestPlanEvent } from '../src/hostEvents.js';
+import { truncateBody, toolAsk, lastAssistantMsgId, assistantText, newestTurnEnd, latestAskEvent, askTurnEnd, askId, renderQuestions, renderPlan, textParts } from '../src/hostEvents.js';
 
 const QUESTIONS = '--- questions ---\n1. Pick one (multiSelect: false) · header: Pick\n   - Alpha: first\n   - Beta: second';
 
@@ -126,6 +126,12 @@ test('lastAssistantMsgId is scoped to the turn ending at endSeq', () => {
 
 const say = (seq, msgId, text, extra = {}) => ({ _seq: seq, kind: 'assistant_message', msgId, message: { content: [{ type: 'text', text }] }, ...extra });
 
+// Invariant: the text blocks of one envelope join with '', as the host joins them, and tool blocks add nothing.
+test('assistantText joins the text blocks of an envelope without a separator', () => {
+  const ev = { _seq: 1, kind: 'assistant_message', message: { content: [{ type: 'text', text: 'Done: ' }, { type: 'tool_use', id: 't' }, { type: 'text', text: 'all green' }] } };
+  assert.equal(assistantText(ev), 'Done: all green');
+});
+
 test('sub-agent events (parentToolUseId) are not the conductor\'s turn: msgId, text and turn_end all skip them', () => {
   const events = [
     say(1, 'main', 'conductor speaking'),
@@ -161,19 +167,11 @@ test('askTurnEnd is the first top-level turn_end after the ask; askId survives r
 
 // Invariant (break policy): a part ends right after the last newline in the back half of its window; with none
 // there it is hard-cut at the size. Fails for "always hard-cut" and for "break at any newline in the window".
-test('planParts breaks after a newline in the back half of the window, else hard-cuts', () => {
+test('textParts breaks after a newline in the back half of the window, else hard-cuts', () => {
   const back = 'ab\ncdef\nghijklmnopqrstu'; // newlines at 2 and 7: only 7 is in [5, 10)
-  assert.deepEqual(planParts(back, 10), ['ab\ncdef\n', 'ghijklmnop', 'qrstu']);
+  assert.deepEqual(textParts(back, 10), ['ab\ncdef\n', 'ghijklmnop', 'qrstu']);
   const front = 'abc\ndefghijklmnopqrstu'; // the only newline is at 3, in the front half
-  assert.deepEqual(planParts(front, 10), ['abc\ndefghi', 'jklmnopqrs', 'tu']);
-  for (const t of [back, front, '', 'x', '\n'.repeat(25)]) assert.equal(planParts(t, 10).join(''), t);
-  assert.deepEqual(planParts('', 10), []);
-});
-
-// Invariant: latestPlanEvent returns the newest top-level plan_request even when auto-approved; sub-agent plans are skipped.
-test('latestPlanEvent returns the newest top-level plan, auto-approved or not', () => {
-  const ev = (seq, extra) => ({ kind: 'plan_request', _seq: seq, plan: `p${seq}`, ...extra });
-  assert.equal(latestPlanEvent([ev(1), ev(2, { autoApproved: true })])._seq, 2);
-  assert.equal(latestPlanEvent([ev(1), ev(2, { parentToolUseId: 'sub' })])._seq, 1);
-  assert.equal(latestPlanEvent([{ kind: 'turn_end', _seq: 1 }]), null);
+  assert.deepEqual(textParts(front, 10), ['abc\ndefghi', 'jklmnopqrs', 'tu']);
+  for (const t of [back, front, '', 'x', '\n'.repeat(25)]) assert.equal(textParts(t, 10).join(''), t);
+  assert.deepEqual(textParts('', 10), []);
 });
