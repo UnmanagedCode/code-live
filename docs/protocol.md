@@ -63,7 +63,7 @@ Each frame is `id: <boot>-<n>` / `event: <name>` / `data: <json>`. `<boot>` is r
 | event | data | sent |
 |---|---|---|
 | `host` | `{connected:boolean}` | on connect (no id), and when the backend's host `/ws` link opens or closes |
-| `announce` | `{sessionId, title, text, turnSeq, isError, ask, planTruncated?}` | when an announced conductor finishes a turn (`sessionId` names it). `text` is at most `MAX_TEXT` chars, or `(turn finished with no text reply)`. `ask` is `{kind:"question", count, truncated?, dropped?}` (AskUserQuestion pending; `text` holds the `--- questions ---` section; `truncated:true` means its lines were shortened to fit `MAX_TEXT` chars, and `dropped:true` that whole trailing lines (options, or questions) are missing and the last line says how many), `{kind:"plan", planPath:string\|null}` (ExitPlanMode pending), or `null`. Separately, `planTruncated:true` is present whenever `text` carries a plan that is cut (past `MAX_TEXT`, or shortened by the host), whether or not the plan is pending: an auto-approved plan has `ask:null` and still gets it |
+| `announce` | `{sessionId, title, text, turnSeq, isError, ask, truncated?, messageKeys?}` | when an announced conductor finishes a turn (`sessionId` names it). `text` is at most `MAX_TEXT` chars, or `(turn finished with no text reply)`. `ask` is `{kind:"question", count, truncated?, dropped?}` (AskUserQuestion pending; `text` holds the `--- questions ---` section; `truncated:true` means its lines were shortened to fit `MAX_TEXT` chars, and `dropped:true` that whole trailing lines (options, or questions) are missing and the last line says how many), `{kind:"plan", planPath:string\|null}` (ExitPlanMode pending), or `null`. Separately, `truncated:true` with `messageKeys` (the `messageKey` of each message the text was assembled from, to read each whole) is present whenever the assembled text was cut at `MAX_TEXT`: long prose, a plan pending or auto-approved (`ask:null`), or both. `ask.truncated` is only about a questions section |
 
 - **Replay:** the backend keeps the last 20 id-bearing events.
   - A request with `Last-Event-ID` from this process gets every ring event after it.
@@ -81,11 +81,12 @@ The declarations are `DECLARATIONS` in `src/tools.js`, with parameter types in G
 | `list_conductor_sessions` | none |
 | `create_conductor_session` | none |
 | `send_to_conductor` | `session` STRING (required), `text` STRING (required, non-empty) |
-| `read_conductor_messages` | `session` STRING (required), `count` INTEGER (optional, 1–10) |
-| `read_conductor_plan` | `session` STRING (required), `part` INTEGER (optional, from 1; omitted is 1; anything else is `INVALID_ARGS`) |
+| `read_conductor_messages` | `session` STRING (required), `count` INTEGER (optional, 1–10), `before` STRING (optional, a `messageKey`), `messageKey` STRING (optional), `part` INTEGER (optional, from 1) |
 | `answer_conductor_question` | `session` STRING (required), `answers` ARRAY (required) of OBJECT `{choices: ARRAY<STRING>, text: STRING, note: STRING}`; entry *n* answers question *n*. A choice is an option number or its words (numbers are also accepted) |
 | `approve_conductor_plan` | `session` STRING (required), `confirmed` BOOLEAN (required; must be `true`), `feedback` STRING (optional) |
 | `reject_conductor_plan` | `session` STRING (required), `feedback` STRING (optional) |
+
+`read_conductor_messages` argument rules (all `INVALID_ARGS`, before any host request): `part` needs `messageKey`; `messageKey` excludes `count` and `before`; `messageKey` and `before` must parse as `<seq>-<msgId>`; `part` must be an integer of at least 1.
 
 `session` is a conductor id or an exact title, case-insensitive. A missing, empty or whitespace-only `session` is `INVALID_ARGS`, and a non-string one is `INVALID_ARGS` too, both before any host request. A tool acts only on the conductor it names. `send_to_conductor`, `create_conductor_session`, `answer_conductor_question`, `approve_conductor_plan` and `reject_conductor_plan` also add that conductor to the announced set (see [Announced conductors](features.md#announced-conductors)).
 
@@ -105,8 +106,8 @@ A session summary is `{sessionId, title, status, lastResponseAt}`. `status` is t
 | `list_conductor_sessions` | `{ok:true, sessions:[summary]}` |
 | `create_conductor_session` | `{ok:true, session:summary}` |
 | `send_to_conductor` | `{ok:true, sessionId, title, delivered:true, note:"The reply will be announced when the conductor finishes its turn."}` |
-| `read_conductor_messages` | `{ok:true, sessionId, title, messages:[{text, hasPlan?, planPath?, planTruncated?, questionCount?}]}`: oldest first, each `text` ≤ `MAX_TEXT` chars (`src/hostEvents.js`). See [reading messages](#reading-messages) |
-| `read_conductor_plan` | `{ok:true, sessionId, title, awaitingApproval, planPath:string\|null, part, parts, totalChars, text}`: `text` is part `part` of `parts`, each at most `PLAN_PART_CHARS` (`src/hostEvents.js`); the parts joined are the whole plan. See [reading a plan](#reading-a-plan) |
+| `read_conductor_messages` (listing) | `{ok:true, sessionId, title, messages:[{messageKey, text, totalChars, hasPlan?, planPath?, questionCount?, questionsTruncated?, questionsDropped?, truncated?}], hint?, nextBefore?}`: oldest first, each `text` ≤ `MAX_TEXT` chars (`src/hostEvents.js`). See [reading messages](#reading-messages) |
+| `read_conductor_messages` (with `messageKey`) | `{ok:true, sessionId, title, messageKey, part, parts, totalChars, text, hasPlan?, planPath?, questionCount?}`: `text` is part `part` of `parts`, each at most `PART_CHARS` (`src/hostEvents.js`); the parts joined are the whole message body |
 | `answer_conductor_question` | `{ok:true, sessionId, title, delivered:true, answered:[{question, answer}], note}`; `question` is 1-based and `answer` is the label list or the free text that was sent |
 | `approve_conductor_plan` | `{ok:true, sessionId, title, mode, delivered:true, note}`; `mode` is the host's reported mode (`bypassPermissions`) |
 | `reject_conductor_plan` | same shape as approve; `mode` stays `plan` |
@@ -128,8 +129,8 @@ Failures are `{ok:false, code, message}`:
 | `HOST_DISCONNECTED` | the `/ws` link dropped before the ack |
 | `SESSION_NOT_READY` | the conductor row has no host session id yet (still spawning) |
 | `NO_PENDING_QUESTION` | the named conductor's row shows no unanswered tool question; the message starts with its title |
-| `NO_PENDING_PLAN` | the named conductor's row shows no unanswered tool plan, or the host's latest messages hold none; the message starts with its title and says which |
-| `NO_PLAN` | the conductor has no plan in its recent events, or its text is unavailable (the message names the plan file when the host could not read it) |
+| `NO_PENDING_PLAN` | the named conductor's row shows no unanswered tool plan, or its latest events hold no `plan_request` whose turn has ended; the message starts with its title and says which |
+| `MESSAGE_NOT_FOUND` | the key's message is not where its seq points within `MAX_EVENT_PAGES` pages (`src/eventPages.js`): evicted from the current segment, renumbered by a respawn, a sub-agent's, or never existed. The message says to list the messages again |
 | `NO_SUCH_PART` | `part` is past the last part; carries `expected` (the number of parts) and `got` |
 | `CONFIRMATION_REQUIRED` | `approve_conductor_plan` without `confirmed: true` |
 | `INVALID_OPTION` | a choice matches no option, or several; carries `question` and `offered` |
@@ -143,21 +144,32 @@ Failures are `{ok:false, code, message}`:
 
 ### Reading messages
 
-- **No `count`:** the host's default selection. The latest message is bonded back to the plan or questions message of its own turn, so `messages` can hold several entries.
-- **Explicit `count`:** exactly that many messages, literally and without bonding, as the host treats an explicit count.
-- Each `text` is the message body as the host renders it: prose, then a `--- plan ---` / `--- plan · saved to <path> ---` section and a `--- questions ---` section (`N. <question> (multiSelect: <bool>) · header: <h>`, then `   - <label>: <description>` per option) in the order they occurred. The host's `--- message i/N … ---` boundary line is dropped.
-- `hasPlan`, `planPath`, `planTruncated` and `questionCount` appear only on the message that carries them.
-- A `text` over `MAX_TEXT` chars keeps a trailing questions section whole and cuts the prose before it. A questions section that alone exceeds `MAX_TEXT` chars is shortened line by line (every line capped at 160, then 80, 40 and 20 chars until it fits, so descriptions go first but a label longer than the cap is cut too) and the message gets `questionsTruncated:true`. If even 20-char lines do not fit, trailing lines are dropped whole, the section ends with `… N more line(s) not shown`, and the message also gets `questionsDropped:true`. A plan, or any other text, is cut from the end; a message with a plan that is cut (here, or by the host's own result budget) gets `planTruncated:true`, and `read_conductor_plan` reads it whole.
-- If the `/mcp` read fails, or the session has no host session id yet, the result is the last `count` (default 1) assistant text messages from the events route, as `[{text}]`, and the failure is logged.
+Reads use the events route only (`GET /api/instances/:id/events`) and need no host session id. `assembleMessages` (`src/eventMessages.js`) rebuilds the messages from the events of one pass, the way the host's own reconstruction does:
 
-### Reading a plan
+- **Grouping:** top-level events (no `parentToolUseId`, with a numeric `_seq`) sharing a `msgId` are one message. A message is kept only when it has prose, narration, a plan or questions.
+- **Prose:** the text blocks of the message's `assistant_message` envelopes joined with `''`, else its `text_delta` chunks per `blockIdx` (events replayed from disk carry no envelope).
+- **Narration:** `thinking_delta` events flagged `narration`, each block trimmed, joined with a blank line.
+- **Plan and questions:** a `plan_request` (auto-approved included) or `user_question` attaches to the message that owns its `toolUseId` (the `ExitPlanMode` / `AskUserQuestion` `tool_use`), else to the latest message before it.
+- **Body:** the segments in the order their blocks first occurred, joined with newlines: the prose, `--- narration ---` and its text, a `--- plan ---` / `--- plan · saved to <path> ---` section, a `--- questions ---` section (`N. <question> (multiSelect: <bool>) · header: <h>`, then `   - <label>: <description>` per option).
+- **`messageKey`:** `<seq>-<msgId>`, where seq is the `_seq` of the message's first event. The seq is only a lookup hint: a respawn renumbers the stream and keeps the `msgId`, so a read checks the `msgId` and that the message starts at that seq, else `MESSAGE_NOT_FOUND`.
 
-- `read_conductor_plan` reads the `plan` text of the newest top-level `plan_request` event, auto-approved or not (`awaitingApproval` says whether the row shows it pending), from `GET /api/instances/:id/events`; it makes no `/mcp` call and never adds the conductor to the announced set.
-- `planParts` (`src/hostEvents.js`) splits the text into parts of at most `PLAN_PART_CHARS` whose concatenation is exactly the plan. A part ends after a newline when one lies in the back half of its window, else it is cut at the limit.
+**Listing** (no `messageKey`):
+- **No `count`, no `before`:** the latest message, bonded back within its own turn (counted by `turn_end`) to the nearest plan or questions message, so `messages` can hold several entries. A turn with none gives the last message alone.
+- **Explicit `count`:** exactly that many messages, literally and without bonding.
+- **`before`:** the messages before that key (one, or `count`). `nextBefore` is the oldest listed `messageKey`, present when older messages may exist, to pass as `before`.
+- Reads go back at most `MAX_EVENT_PAGES` pages of `EVENTS_PAGE` events (`src/eventPages.js`). The oldest message of a window that the host says has older events is not listed, because it may be cut at the page seam.
+- Each `text` is the body, cut when over `MAX_TEXT` chars: a trailing questions section stays whole and the prose before it is cut. A questions section that alone exceeds `MAX_TEXT` chars is shortened line by line (every line capped at 160, then 80, 40 and 20 chars until it fits, so descriptions go first but a label longer than the cap is cut too) and the message gets `questionsTruncated:true`. If even 20-char lines do not fit, trailing lines are dropped whole, the section ends with `… N more line(s) not shown`, and the message also gets `questionsDropped:true`. Anything else is cut from the end.
+- `totalChars` is the body's full length. `truncated:true` means the shown `text` is shorter than the body, and the result then has a `hint` saying to read each such message whole with its `messageKey`.
+- `hasPlan`, `planPath` and `questionCount` appear only on the message that carries them.
+
+**One message** (`messageKey`, optional `part`):
+- The events after the key's seq are read forward until the message is closed (a turn end, or another message, follows) and every plan or question it asked has its event.
+- `textParts` (`src/hostEvents.js`) splits the body into parts of at most `PART_CHARS` whose concatenation is exactly the body. A part ends after a newline when one lies in the back half of its window, else it is cut at the limit.
+- `part` defaults to 1; a part past `parts` is `NO_SUCH_PART`.
 
 ### Answering and deciding
 
-- **Pending gates** use the session row's `awaitingUser` / `awaitingUserSource`, because the host's `answer_question` and `approve_plan` do not check that anything is pending. A question needs `awaitingUser === "question"` and `awaitingUserSource === "tool"`. A plan needs `"plan"` and `"tool"`, and a fresh `get_recent_messages` that has a message with `hasPlan`.
+- **Pending gates** use the session row's `awaitingUser` / `awaitingUserSource`, because the host's `answer_question` and `approve_plan` do not check that anything is pending. A question needs `awaitingUser === "question"` and `awaitingUserSource === "tool"`. A plan needs `"plan"` and `"tool"`, and the newest unanswered `plan_request` in the events with the `turn_end` that ended its turn.
 - **Choice resolution**, first match wins: exact label, option number (`2`, `option 2`), label equal after folding case, whitespace and punctuation, equal with a trailing parenthetical such as ` (Recommended)` dropped, then a unique partial match. No match, or several at one step, is `INVALID_OPTION`.
 - The question structure comes from the newest top-level (no `parentToolUseId`) `user_question` event (`GET /api/instances/:id/events`). If none is found, choices pass through to the host unchanged.
 - **Retry:** when the host answers `INVALID_OPTION` with its `offered` labels, the spoken words are resolved once against those labels and the call is repeated once. A second refusal is returned as `INVALID_OPTION` with `question` and `offered`.
@@ -174,12 +186,12 @@ All calls go to `$CONDUCTOR_URL`, with a 5 s timeout for REST.
 |---|---|
 | list sessions | `GET /api/instances`. Conductor rows have `project === ".conduct"` |
 | create a conductor | `POST /api/projects/.conduct/ensure` (no body), then `POST /api/instances` with `{"project":".conduct","role":"conductor","temp":true,"mode":"bypassPermissions"}` → 201 summary |
-| read events | `GET /api/instances/:id/events?limit=500`. Uses `kind`/`_seq`/`lastSeq`, `assistant_message.{msgId,message.content[].{type,text}}`, `turn_end.isError`, `user_question.{toolUseId,questions}` and `plan_request.{toolUseId,plan,planPath,autoApproved}`. Events with `parentToolUseId` (sub-agents) are ignored, as the host's own turn reconstruction does |
+| read events | `GET /api/instances/:id/events?limit=<EVENTS_PAGE>`, with `before=<seq>` (the page before it; `nextBefore` and `hasMore` in the reply) or `after=<seq>` (exclusive) for older or newer pages; a read makes at most `MAX_EVENT_PAGES` requests (`src/eventPages.js`). Uses `kind`/`_seq`/`lastSeq`, `assistant_message.{msgId,message.content[].{type,text}}`, `text_delta.{msgId,blockIdx,text}`, `thinking_delta.{msgId,blockIdx,text,narration}`, `tool_use.{msgId,toolUseId,name}`, `turn_end.isError`, `user_question.{toolUseId,questions}` and `plan_request.{toolUseId,plan,planPath,autoApproved}`. Events with `parentToolUseId` (sub-agents) and events without `_seq` (`history_gap`) are ignored. Events below the in-memory ring come from disk and carry no `assistant_message` |
 | send a prompt | WS `/ws`: `{"t":"prompt","id":"<instance id>","text":"…","reqId":"code-live-<n>"}` → `{"t":"ack","reqId","ok","error"?}` |
 | turn ends | WS `/ws` broadcast `{"t":"turn_notification","id","project","isError","stopReason","cost"}` |
 | instance list changed | WS `/ws` broadcast `{"t":"instances",…}`. Only its arrival matters: the row is re-read over REST. Other frame types are ignored |
-| instance row fields used | `id`, `project`, `sessionId` (the host's public session id, `null` while spawning; the `/mcp` handle), `awaitingUser` (`"question"` \| `"plan"`), `awaitingUserSource` (`"tool"` for AskUserQuestion / ExitPlanMode), `lastResponseAt`, plus the status fields above |
-| MCP tools | `POST /mcp`, 10 s timeout, stateless: one `{"jsonrpc":"2.0","id":<n>,"method":"tools/call","params":{"name","arguments"}}` per request, no `initialize`. Only `src/hostMcp.js` makes it |
+| instance row fields used | `id`, `project`, `sessionId` (the host's public session id, `null` while spawning; the `/mcp` handle for the write tools), `awaitingUser` (`"question"` \| `"plan"`), `awaitingUserSource` (`"tool"` for AskUserQuestion / ExitPlanMode), `lastResponseAt`, plus the status fields above |
+| MCP tools (writes only) | `POST /mcp`, 10 s timeout, stateless: one `{"jsonrpc":"2.0","id":<n>,"method":"tools/call","params":{"name","arguments"}}` per request, no `initialize`. Only `src/hostMcp.js` makes it |
 
 ### `/mcp` tools
 
@@ -187,7 +199,6 @@ The reply is `{result:{content:[{type:"text",text}…], isError?}}` or `{error:{
 
 | tool | arguments | used for |
 |---|---|---|
-| `get_recent_messages` | `sessionId`, optional `count` | `content[0]` is metadata JSON `{messages:[{msgId, hasPlan?, planPath?, questionCount?, …}], …}`; `content[k+1]` is the raw body of `messages[k]`. No `count` bonds the default selection; `count` is literal |
 | `answer_question` | `sessionId`, `answers` (0-based, one per question: `{option}`, `{options}`, `{text}` or `{}`, plus optional `note`) | answering; refusals `INVALID_OPTION` (with `questionIndex`, 0-based, and `offered`), `NOT_MULTISELECT`, `ANSWER_COUNT_MISMATCH`, `EMPTY_ANSWER` |
 | `approve_plan` | `sessionId`, optional `feedback` | approving; returns `{sessionId, mode, sentText}` |
 | `reject_plan` | `sessionId`, optional `feedback` | rejecting; returns `{sessionId, mode, sentText}` |
@@ -231,7 +242,7 @@ The page connects to `wss://generativelanguage.googleapis.com/ws/google.ai.gener
 |---|---|
 | `{"realtimeInput":{"audio":{"data":"<b64>","mimeType":"audio/pcm;rate=16000"}}}` | mic chunks (16-bit LE mono) while the mic is not paused |
 | `{"realtimeInput":{"audioStreamEnd":true}}` | `pauseMic()` while live, once per pause |
-| `{"realtimeInput":{"text":"CONDUCTOR UPDATE from \"<title>\" (session <id>):\n<text>[\n<footer>]"}}` | announcements; does not interrupt current speech. `<footer>` is the `AWAITING ANSWER` / `AWAITING PLAN APPROVAL` line, naming the tool and `session <id>`, when `ask` is set; when `planTruncated` is set (pending or not) a last line tells Gemini to read every part with `read_conductor_plan` for that session. Line breaks (`\n`, `\r`, `\v`, `\f`, U+001C–U+001E, U+0085, U+2028, U+2029) in `<title>`, `<id>` and a plan path in the footer become spaces, and `"` in `<title>` becomes `'`. A `<text>` line that reads as `CONDUCTOR UPDATE` or `AWAITING ` gets a leading `> `: invisible characters (`\p{Cf}`, default-ignorable code points) and combining marks (after NFKD) are dropped, any Unicode space counts as a space, case is ignored, and `AWAITING` must end at a word boundary, when deciding; the same breaks split `<text>` into lines. Look-alike letters and markdown-decorated markers are not caught (accepted residual risk). The transcript shows the title and text unchanged |
+| `{"realtimeInput":{"text":"CONDUCTOR UPDATE from \"<title>\" (session <id>):\n<text>[\n<footer>]"}}` | announcements; does not interrupt current speech. `<footer>` is the `AWAITING ANSWER` / `AWAITING PLAN APPROVAL` line, naming the tool and `session <id>`, when `ask` is set; when `truncated` and `messageKeys` are set (pending ask or not) a last line names `read_conductor_messages`, the session and each key, to read the update whole. Each key stays on that line. Line breaks (`\n`, `\r`, `\v`, `\f`, U+001C–U+001E, U+0085, U+2028, U+2029) in `<title>`, `<id>` and a plan path in the footer become spaces, and `"` in `<title>` becomes `'`. A `<text>` line that reads as `CONDUCTOR UPDATE` or `AWAITING ` gets a leading `> `: invisible characters (`\p{Cf}`, default-ignorable code points) and combining marks (after NFKD) are dropped, any Unicode space counts as a space, case is ignored, and `AWAITING` must end at a word boundary, when deciding; the same breaks split `<text>` into lines. Look-alike letters and markdown-decorated markers are not caught (accepted residual risk). The transcript shows the title and text unchanged |
 | `{"toolResponse":{"functionResponses":[{"id","name","response":<tool result>}]}}` | after each tool call, unless cancelled; no `scheduling` field |
 
 **Gemini → client:**
