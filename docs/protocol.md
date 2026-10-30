@@ -92,14 +92,15 @@ The declarations are `DECLARATIONS` in `src/tools.js`, with parameter types in G
 
 ### Tool results
 
-A session summary is `{sessionId, title, status, lastResponseAt}`. `status` is the host's run state, derived from the `GET /api/instances` row fields `status`, `displayStatus` and `awaitingWake` (`summarize` in `src/hostEvents.js`). `title` is the instance title, else the first prompt cut to 60 chars (`…` suffix), else `Untitled conductor`.
+A session summary is `{sessionId, title, status, lastResponseAt}`. `status` is the host's run state, derived from the `GET /api/instances` row fields `status`, `displayStatus`, `awaitingWake` and `waitingOnJob` (`summarize` in `src/hostEvents.js`), mirroring the host UI's own run label. `title` is the instance title, else the first prompt cut to 60 chars (`…` suffix), else `Untitled conductor`.
 
-| host row | reported `status` |
+| host row: `displayStatus`, else `status` | reported `status` |
 |---|---|
-| `idle`, `displayStatus` `idle` or absent, `awaitingWake` false | `idle`: nothing is in flight |
-| `idle`, `displayStatus` `idle`, `awaitingWake` true | `on a worker`: the host's own label for a conductor waiting on a worker |
-| `idle`, `displayStatus` `running` (background subagents), any `awaitingWake` | `running` |
-| `turn`, `spawning`, `exited`, `crashed`, any `awaitingWake` | unchanged |
+| `idle`, `awaitingWake` true, any `waitingOnJob` | `on a worker`: waiting on a worker's turn; a worker wins over a job |
+| `idle`, `awaitingWake` false, `waitingOnJob` true | `on a job`: a background Bash job runs on the conductor or on a live session it owns |
+| `idle`, `awaitingWake` false, `waitingOnJob` false or absent | `idle`: nothing is in flight |
+| `running` (an idle session with background subagents) or `turn`, any `awaitingWake` / `waitingOnJob` | `running` |
+| `spawning`, `exited`, `crashed`, any `awaitingWake` / `waitingOnJob` | unchanged |
 
 | tool | success |
 |---|---|

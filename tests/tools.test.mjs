@@ -40,22 +40,30 @@ test('list returns conductors only with one host call', async (t) => {
     ok: true,
     sessions: [
       { sessionId: 'cond-a', title: 'Alpha plan', status: 'idle', lastResponseAt: 1 },
-      { sessionId: 'cond-b', title: 'Build the beta release pipeline and report back on everythi…', status: 'turn', lastResponseAt: 2 },
+      { sessionId: 'cond-b', title: 'Build the beta release pipeline and report back on everythi…', status: 'running', lastResponseAt: 2 },
     ],
   });
   assert.equal(r.sessions[1].title.length, 60);
 });
 
 test("list reports the host's run state: idle only when nothing is in flight", async (t) => {
-  const row = (id, status, displayStatus, activeAgentTasks, awaitingWake) => (
-    { ...CONDUCTOR_A, id, title: id, status, displayStatus, activeAgentTasks, awaitingWake }
-  );
+  const row = (id, status, displayStatus, activeAgentTasks, awaitingWake, waitingOnJob) => {
+    const r = { ...CONDUCTOR_A, id, title: id, status, displayStatus, activeAgentTasks, awaitingWake, waitingOnJob };
+    if (waitingOnJob === undefined) delete r.waitingOnJob;
+    return r;
+  };
   const rows = [
-    row('waiting', 'idle', 'idle', 0, true),
-    row('subagents', 'idle', 'running', 2, false),
-    row('both', 'idle', 'running', 1, true),
-    row('idle', 'idle', 'idle', 0, false),
-    row('turn-wake', 'turn', 'turn', 0, true),
+    row('waiting', 'idle', 'idle', 0, true, false),
+    row('subagents', 'idle', 'running', 2, false, false),
+    row('both', 'idle', 'running', 1, true, false),
+    row('idle', 'idle', 'idle', 0, false, false),
+    row('turn-wake', 'turn', 'turn', 0, true, false),
+    row('job', 'idle', 'idle', 0, false, true),
+    row('wake-job', 'idle', 'idle', 0, true, true),
+    row('subagents-job', 'idle', 'running', 1, false, true),
+    row('turn-job', 'turn', 'turn', 0, false, true),
+    row('crashed-job', 'crashed', 'crashed', 0, false, true),
+    row('no-job-field', 'idle', 'idle', 0, false, undefined),
   ];
   const { app } = await setup(t, { instances: rows });
   const r = await callTool(app, 'list_conductor_sessions');
@@ -64,7 +72,13 @@ test("list reports the host's run state: idle only when nothing is in flight", a
     ['subagents', 'running'],
     ['both', 'running'],
     ['idle', 'idle'],
-    ['turn-wake', 'turn'],
+    ['turn-wake', 'running'],
+    ['job', 'on a job'],
+    ['wake-job', 'on a worker'],
+    ['subagents-job', 'running'],
+    ['turn-job', 'running'],
+    ['crashed-job', 'crashed'],
+    ['no-job-field', 'idle'],
   ]);
 });
 

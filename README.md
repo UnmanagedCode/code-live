@@ -61,7 +61,7 @@ The catalog, per-model settings and the picker hints (the `hint` field) live in 
 
 | tool | args | does |
 |---|---|---|
-| `list_conductor_sessions` | none | lists live conductor sessions (`GET /api/instances`, `project === ".conduct"`), with each one's run state (`on a worker` while it waits on a worker; [mapping](docs/protocol.md#tool-results)) |
+| `list_conductor_sessions` | none | lists live conductor sessions (`GET /api/instances`, `project === ".conduct"`), with each one's run state (`on a worker` while it waits on a worker, `on a job` while a background job runs; [mapping](docs/protocol.md#tool-results)) |
 | `create_conductor_session` | none | ensures `.conduct` and spawns a conductor, then announces its replies |
 | `send_to_conductor` | `session` (id or exact title), `text` | prompts that conductor over the host `/ws` and announces its replies |
 | `read_conductor_messages` | `session`, optional `count` (1–10), `before`, `messageKey`, `part` | the latest assistant message with the plan or questions its turn ended on, each cut at `MAX_TEXT` (`src/hostEvents.js`) and marked `truncated` when cut, with a `messageKey`; `count` returns exactly that many, `before` the ones before a key; with `messageKey` it returns that message whole, in parts of `PART_CHARS`, `part` from 1. Reads the events route only. Never starts announcing it |

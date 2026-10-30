@@ -114,14 +114,17 @@ export function toolAsk(row) {
   return row?.awaitingUserSource === 'tool' && (ask === 'question' || ask === 'plan') ? ask : null;
 }
 
-// The host's raw `status: 'idle'` only means the session's own turn ended. Like
-// the host's own UI, prefer `displayStatus` (`running` while background subagents
-// work) and label an idle session that awaits a worker's wake `on a worker`.
-// Both overlays apply only to `idle`, so `turn`, `spawning`, `exited` and
-// `crashed` pass through.
+// The host's raw `status: 'idle'` only means the session's own turn ended. This
+// mirrors the host UI's own run label (`runLabel`): it reads `displayStatus`
+// (`running` while background subagents work) over `status`. An idle session
+// can still be waiting on a worker's wake or on a background job
+// (`waitingOnJob`: one on it or on a live session it owns), and the worker wins.
+// Every status other than `idle`, `turn` and `running` passes through.
 function runState(inst) {
   const shown = inst.displayStatus ?? inst.status;
-  return shown === 'idle' && inst.awaitingWake ? 'on a worker' : shown;
+  if (shown === 'idle') return inst.awaitingWake ? 'on a worker' : inst.waitingOnJob ? 'on a job' : 'idle';
+  if (shown === 'turn' || shown === 'running') return 'running';
+  return shown;
 }
 
 export function summarize(inst) {
