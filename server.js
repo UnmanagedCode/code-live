@@ -4,6 +4,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from './src/config.js';
+import { migrateLegacyStore } from './src/migrateLegacyStore.js';
 import { createKeyStore } from './src/keyStore.js';
 import { createPrefsStore } from './src/prefsStore.js';
 import { createStateStore } from './src/stateStore.js';
@@ -106,6 +107,8 @@ function listenWithRetry(server, port, host, { tries = 40, delayMs = 100 } = {})
 
 export async function start(env = process.env) {
   const config = loadConfig(env);
+  // Before buildDeps: nothing may create or open the data dir until a legacy store has moved in.
+  await migrateLegacyStore({ env, dataDir: config.dataDir });
   const deps = await buildDeps(config);
   // The API and healthPath stay up without a built UI; the page answers 503 until it is built.
   if (!deps.uiBuilt) console.error(`code-live: UI not built: ${path.join(deps.distDir, 'index.html')} is missing — run npm install`);

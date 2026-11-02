@@ -22,8 +22,9 @@ browser (Code Live page)                       code-live backend (node:http)    
 
 | file | responsibility |
 |---|---|
-| `server.js` | entry: `buildDeps(config, opts)` builds the collaborators; `createServer(deps)` does routing (a request target that fails to parse is `400 BAD_REQUEST`), the JSON body gate, static files and error mapping (`STATUS_BY_CODE`); `start()` listens (retrying on `EADDRINUSE`), starts the host link, runs the startup reconcile and handles SIGTERM. It auto-starts only when run directly |
-| `src/config.js` | `loadConfig(env)`: env → config; throws on a missing `PROJECTS_ROOT` / `CONDUCTOR_URL`; derives `dataDir`, `geminiWsUrl` and `hostWsUrl` |
+| `server.js` | entry: `buildDeps(config, opts)` builds the collaborators; `createServer(deps)` does routing (a request target that fails to parse is `400 BAD_REQUEST`), the JSON body gate, static files and error mapping (`STATUS_BY_CODE`); `start()` runs the store migration before `buildDeps`, then listens (retrying on `EADDRINUSE`), starts the host link, runs the startup reconcile and handles SIGTERM. It auto-starts only when run directly |
+| `src/config.js` | `loadConfig(env)`: env → config; throws on a missing or relative `CONDUCTOR_PLUGIN_DATA_DIR` or a missing `CONDUCTOR_URL`; takes `dataDir` from the former; derives `geminiWsUrl` and `hostWsUrl` |
+| `src/migrateLegacyStore.js` | `migrateLegacyStore({env, dataDir, log, rename})`: the boot move of a legacy store into the data dir; the only code naming `PROJECTS_ROOT` and `.code-live` |
 | `src/atomicFile.js` | `writeFileAtomic` (0600 temp file + rename + chmod, directory 0700) and `readJson` (`null` if absent, `STORE_CORRUPT` if unparseable) |
 | `src/keyStore.js` | `secrets.json`: `get` (the only key accessor, used only by `gemini.js`), `status`, `set` (validation), `clear` |
 | `src/voices.js` | `VOICES` (the prebuilt Gemini voices, `{name, style}`) and `isVoice` (exact, case-sensitive); read by `prefsStore.js` and `GET /api/voices` |
@@ -75,7 +76,7 @@ The frontend is split in two: **plain DOM-free ES modules** in `frontend/src/lib
 
 ## On-disk state
 
-Everything lives under `$PROJECTS_ROOT/.code-live/` (directory mode 0700). The path comes from the host-provided env; no other location is written.
+Everything lives under `$CONDUCTOR_PLUGIN_DATA_DIR` (directory mode 0700, created with its missing parents on the first write). The host provides the path and never creates it; no other location is written.
 
 | file | contents | mode |
 |---|---|---|
@@ -89,6 +90,27 @@ Everything lives under `$PROJECTS_ROOT/.code-live/` (directory mode 0700). The p
 - A malformed file throws `STORE_CORRUPT`; it is never treated as empty.
 - `preferences.json` is `STORE_CORRUPT` when it is not an object, its `voice` is neither `null` nor a `VOICES` name, or its `customPrompt` is not a string or fails the input validation (length, control characters). A missing field takes its default (`null`, `''`). A token mint then fails with `500 STORE_CORRUPT`; recover by deleting the file.
 - The backend fails to start if `state.json` is corrupt.
+
+### Store migration
+
+`start()` runs `migrateLegacyStore` after `loadConfig` and before `buildDeps`, so nothing creates or opens the data dir until a legacy store has moved in. It moves `$PROJECTS_ROOT/.code-live` into the data dir with one `rename` and never opens a file.
+
+| condition | outcome |
+|---|---|
+| `PROJECTS_ROOT` unset or empty | `skipped` |
+| legacy path equals the data dir | `same` |
+| no legacy path | `absent` (also a re-run after a move) |
+| legacy path not inspectable, or not a directory (file, symlink) | refused |
+| target not inspectable, or exists and is not a directory (file, symlink) | refused |
+| target is a directory with entries | refused; delete one side and restart |
+| target is an empty directory | removed, then the move proceeds |
+| missing parent of the target | created at 0700; existing parents are left alone |
+| `rename` fails (`EXDEV` or any other error) | refused with an `mv` hint |
+| `rename` succeeds | `moved` |
+
+- A refusal is an `ESTOREMIGRATE` error naming both paths and the fix. It never moves, copies or changes store data and never includes the key; it may leave an emptied target removed, or empty parents in place.
+- The rename moves the directory itself, so `secrets.json` keeps 0600 and the directory keeps 0700. There is no copy branch.
+- On refusal `start()` rejects and the process exits 1 with no server, link or reconcile. The data dir is created only by a write through a running server, so a refused boot never starts an empty store beside the legacy one. Every restart refuses again until the fix is applied.
 
 ## Host link (`ccLink`)
 
@@ -167,12 +189,13 @@ Duplicate triggers therefore never double-announce, and a turn missed during a d
 
 - **Dependencies:** a fresh clone gets them, and `frontend/dist`, from `npm install`. A worktree has no `node_modules`: `npm install` there (or symlink a checkout's whose versions match), then `npm run prepare`, because `tests/dist.test.mjs` reads the real build and fails with `run npm run prepare` without it.
 
+- **Migration:** `tests/migrateLegacyStore.test.mjs` covers every migration branch on temp fixtures using the sentinel key, plus boot refusal through `start()` and core reading the moved store.
 - **Fakes:**
   - `tests/fakes/fakeGemini.mjs` fakes the auth_tokens mint (with an injectable failure) and the Live socket. It checks single-use tokens, sends binary frames, and records client messages. `session(i)` / `next(pred)` / `closed` let tests await specific traffic, and `setConnectMode('reject')` makes resume attempts fail.
   - `tests/fakes/fakeHost.mjs` fakes the instance, ensure and events routes, plus `/ws` prompt/ack. Ack modes are `ok` / `refuse` / `silent`. It also has `broadcast`, `dropConnections`, `onPrompt` hooks and `finishTurn(id, text)`.
   - Its events route pages like the host's: a trailing window, `before` and `after` cursors, `hasMore` and `nextBefore`, as exact windows (the host's snap to a clean boundary is not modelled). `finishTurn` and `finishAsk` stream a message as the live host does: `message_start`, a `text_delta`, `text_end` and the `assistant_message` envelope under one `msgId`, then for an ask the `tool_use` (`inputPlan:false` leaves the plan only on the `plan_request`, the file-backed case; `autoApproved` marks it auto-approved) and the `plan_request` / `user_question`, then `turn_end`. `finishAsk` also sets the row's `awaitingUser*` fields (`frames:false` sends no `/ws` frame). `archiveBelow(id, seq)` serves the events below a seq as the host serves them from disk (deltas only, no `assistant_message`, a `history_gap` at the seam); `resetRing(id)` renumbers the events as a respawn does; `setRow` patches a row.
   - Its `POST /mcp` checks the JSON-RPC request shape, records `mcpCalls`, and takes handlers for the write tools through `setMcp(name, fn)` with the `mcpOk` / `mcpSoft` / `mcpThrown` envelopes; with no handler a tool answers unknown.
-- **Harness:** `tests/helpers.mjs`' `startApp()` builds a real server through `buildDeps` with a fresh temp `PROJECTS_ROOT` and short link timings; `distDir` serves a fixture build (`fixtureDist()`: Vite's file shapes plus names that must never be served) and `fetchImpl` replaces the backend's outbound fetch. It also provides an SSE client, `nodeFetch` (a `node:http` fetch for page code under a test DOM, whose own fetch enforces CORS) and `SENTINEL_KEY`; tests use only that sentinel key.
+- **Harness:** `tests/helpers.mjs`' `startApp()` builds a real server through `buildDeps` with a fresh temp root (the data dir is `dataDirIn(root)`) and short link timings; `distDir` serves a fixture build (`fixtureDist()`: Vite's file shapes plus names that must never be served) and `fetchImpl` replaces the backend's outbound fetch. It also provides an SSE client, `nodeFetch` (a `node:http` fetch for page code under a test DOM, whose own fetch enforces CORS) and `SENTINEL_KEY`; tests use only that sentinel key.
 - **Frontend:** node tests import the `frontend/src/lib` modules directly and inject fakes (`frontend-controller`, `frontend-micCapture`, `frontend-transcriptStore`, …). Vitest renders the components; `frontend/src/App.integration.test.tsx` drives the real `<App>` over the real controller against the real backend, fake Gemini and fake host, with the network (`nodeFetch`), the `ws` WebSocket and audio/mic stubs injected through the controller's `env`.
 - **Build:** `tests/dist.test.mjs` checks the real `frontend/dist`: every file matches the served-name rule, the head order and relative URLs, no inline script or style, no source maps, no `url(` or absolute URL in the CSS, no root-relative `/api/` in the JS, and that the backend serves each referenced file with the CSP.
 - **Waits:** tests wait on observable outcomes (an SSE event, a received frame, a published marker), never on fixed sleeps.
