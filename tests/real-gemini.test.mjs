@@ -38,7 +38,7 @@ for (const model of MODELS) {
   test(`real Gemini Live: ${model.id}`, { skip: !RUN && 'set RUN_REAL_GEMINI=1', timeout: TIMEOUT * 3 }, async () => {
     const key = process.env.GEMINI_API_KEY;
     assert.ok(key, 'GEMINI_API_KEY must be set');
-    const config = loadConfig({ PROJECTS_ROOT: '/nonexistent', CONDUCTOR_URL: 'http://127.0.0.1:1' });
+    const config = loadConfig({ CONDUCTOR_PLUGIN_DATA_DIR: '/nonexistent/code-live', CONDUCTOR_URL: 'http://127.0.0.1:1' });
     const gemini = createGemini({ base: config.geminiBase, wsUrl: config.geminiWsUrl, keyStore: { get: async () => key }, prefsStore });
     const toolCalls = [];
     const api = {

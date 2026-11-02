@@ -1,4 +1,4 @@
-// Pins: preferences.json lives at <PROJECTS_ROOT>/.code-live/, is 0600 and
+// Pins: preferences.json lives at <dataDir>, is 0600 and
 // written atomically; defaults when absent; the voice and prompt are
 // validated before anything is written; a malformed file fails loudly; and
 // concurrent setters both land.
@@ -7,12 +7,12 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createPrefsStore, CUSTOM_PROMPT_MAX } from '../src/prefsStore.js';
-import { tempDir, waitFor } from './helpers.mjs';
+import { tempDir, waitFor, dataDirIn } from './helpers.mjs';
 
 async function setup(t, opts = {}) {
   const root = await tempDir();
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const dir = path.join(root, '.code-live');
+  const dir = dataDirIn(root);
   return { dir, store: createPrefsStore({ dir, ...opts }) };
 }
 

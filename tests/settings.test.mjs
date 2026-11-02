@@ -61,7 +61,7 @@ test('both survive a restart', async (t) => {
   await put(first, 'voice', { voice: 'Kore' });
   await put(first, 'custom-prompt', { customPrompt: 'Be brief.' });
   await first.stop({ keepRoot: true });
-  second = await startApp({ projectsRoot: first.root, startLink: false });
+  second = await startApp({ root: first.root, startLink: false });
   const r = await req(`${second.url}/api/settings`);
   assert.equal(r.json.voice, 'Kore');
   assert.equal(r.json.customPrompt, 'Be brief.');

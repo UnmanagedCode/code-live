@@ -39,11 +39,11 @@ Open **Settings** at the bottom of the Code Live page.
 - **Gemini key:** paste it and press **Save**.
 - **Voice:** a prebuilt Gemini voice, or `Default` for the model's own. Only voice names are listed; preview them in Google AI Studio.
 - **Custom instructions:** text appended after code-live's built-in system prompt, under a header that says the built-in rules take precedence. Saving empty text clears it. The length bound is `CUSTOM_PROMPT_MAX` in `src/prefsStore.js`.
-- Voice and instructions are stored in `$PROJECTS_ROOT/.code-live/preferences.json` and composed into the token's locked setup when it is minted. They apply from the next Connect, and the controls are locked while connected.
+- Voice and instructions are stored in `$CONDUCTOR_PLUGIN_DATA_DIR/preferences.json` and composed into the token's locked setup when it is minted. They apply from the next Connect, and the controls are locked while connected.
 
 The key:
 
-- It is stored at `$PROJECTS_ROOT/.code-live/secrets.json` (file mode `0600`, directory `0700`, written atomically).
+- It is stored at `$CONDUCTOR_PLUGIN_DATA_DIR/secrets.json` (file mode `0600`, directory `0700`, written atomically; a migrated store keeps the modes it had).
 - The page never receives it back. Only `Key set (••••<last 4>)` is shown.
 - The browser gets a single-use **ephemeral token** per connection, minted by the backend. The token locks the model, voice, tools and system prompt, so the page cannot change them.
 
@@ -104,11 +104,12 @@ The real smoke test reads the key only from `GEMINI_API_KEY`. Pass it inline and
 |---|---|---|
 | `PORT` | `7300` | backend port (the host allocates one) |
 | `HOST` | `127.0.0.1` | bind address |
-| `PROJECTS_ROOT` | **required** | data lives in `$PROJECTS_ROOT/.code-live/` |
+| `CONDUCTOR_PLUGIN_DATA_DIR` | **required**, absolute | the data dir (the host provides it; code-live creates it at 0700) |
+| `PROJECTS_ROOT` | optional | read only by the boot migration that moves a store left at `$PROJECTS_ROOT/.code-live/` into the data dir ([architecture](docs/architecture.md#store-migration)) |
 | `CONDUCTOR_URL` | **required** | host API base, e.g. `http://127.0.0.1:<port>` |
 | `CODE_LIVE_GEMINI_BASE` | `https://generativelanguage.googleapis.com` | Gemini API base; tests point it at a fake |
 
-The backend exits with an error if `PROJECTS_ROOT` or `CONDUCTOR_URL` is missing.
+The backend exits with an error if `CONDUCTOR_PLUGIN_DATA_DIR` (absolute) or `CONDUCTOR_URL` is missing, or if the store migration refuses.
 
 ## Known limitations
 

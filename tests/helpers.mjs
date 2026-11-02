@@ -1,5 +1,5 @@
 // Shared test harness: a real code-live server wired to fake Gemini/host
-// servers and a fresh temp PROJECTS_ROOT.
+// servers and a fresh temp root holding the data dir (dataDirIn(root)).
 import { promises as fs } from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -8,6 +8,9 @@ import { loadConfig } from '../src/config.js';
 import { buildDeps, createServer } from '../server.js';
 
 export const SENTINEL_KEY = 'fake-gemini-key-SENTINEL-0123456789abcdef';
+
+// The data dir an app under `root` uses; nested so the first write creates it.
+export const dataDirIn = (root) => path.join(root, 'data', 'code-live');
 
 export async function tempDir() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'code-live-test-'));
@@ -25,13 +28,13 @@ export async function waitFor(fn, { timeoutMs = 2000, what = 'condition' } = {})
 }
 
 // Starts the app. `startLink` connects to the fake host's /ws and waits for
-// the first open; `projectsRoot` reuses an existing root (restart tests);
+// the first open; `root` reuses an existing root (restart tests);
 // `distDir` serves another UI build than frontend/dist; `fetchImpl` replaces the
 // backend's outbound fetch (under a test DOM, the global fetch is the DOM's).
-export async function startApp({ gemini, host, projectsRoot, now, distDir, fetchImpl, link = {}, startLink = true, reconcileOnStart = true } = {}) {
-  const root = projectsRoot ?? await tempDir();
+export async function startApp({ gemini, host, root: givenRoot, now, distDir, fetchImpl, link = {}, startLink = true, reconcileOnStart = true } = {}) {
+  const root = givenRoot ?? await tempDir();
   const config = loadConfig({
-    PROJECTS_ROOT: root,
+    CONDUCTOR_PLUGIN_DATA_DIR: dataDirIn(root),
     CONDUCTOR_URL: host ? host.url : 'http://127.0.0.1:9',
     CODE_LIVE_GEMINI_BASE: gemini ? gemini.base : 'http://127.0.0.1:9',
   });

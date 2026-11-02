@@ -1,4 +1,3 @@
 node_modules
-.code-live/
 frontend/dist/
 package-lock.json

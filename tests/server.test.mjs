@@ -66,7 +66,7 @@ test('security headers on every kind of response', async (t) => {
 test('the production CSP allows only the Gemini Live origin', async () => {
   const { securityHeaders } = await import('../src/http.js');
   const { loadConfig } = await import('../src/config.js');
-  const c = loadConfig({ PROJECTS_ROOT: '/r', CONDUCTOR_URL: 'http://127.0.0.1:1' });
+  const c = loadConfig({ CONDUCTOR_PLUGIN_DATA_DIR: '/r/code-live', CONDUCTOR_URL: 'http://127.0.0.1:1' });
   assert.match(securityHeaders(c.geminiWsUrl)['content-security-policy'], /connect-src 'self' wss:\/\/generativelanguage\.googleapis\.com;/);
 });
 

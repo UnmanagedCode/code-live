@@ -1,4 +1,4 @@
-// Pins: the key file lives at <PROJECTS_ROOT>/.code-live/secrets.json, is
+// Pins: the key file lives at <dataDir>/secrets.json, is
 // 0600, is written atomically, never echoes an invalid key, and a corrupt
 // store fails loudly; state.json round-trips.
 import { test } from 'node:test';
@@ -8,11 +8,11 @@ import path from 'node:path';
 import { loadConfig } from '../src/config.js';
 import { createKeyStore } from '../src/keyStore.js';
 import { createStateStore } from '../src/stateStore.js';
-import { SENTINEL_KEY, tempDir } from './helpers.mjs';
+import { SENTINEL_KEY, tempDir, dataDirIn } from './helpers.mjs';
 
 async function setup() {
   const root = await tempDir();
-  const config = loadConfig({ PROJECTS_ROOT: root, CONDUCTOR_URL: 'http://127.0.0.1:1/' });
+  const config = loadConfig({ CONDUCTOR_PLUGIN_DATA_DIR: dataDirIn(root), CONDUCTOR_URL: 'http://127.0.0.1:1/' });
   return { root, config, store: createKeyStore({ dir: config.dataDir }) };
 }
 
@@ -23,7 +23,7 @@ test('set/get/status/clear round-trip at the env-derived path with mode 0600', a
   assert.equal(await store.get(), null);
 
   await store.set(`  ${SENTINEL_KEY}\n`);
-  const file = path.join(root, '.code-live', 'secrets.json');
+  const file = path.join(dataDirIn(root), 'secrets.json');
   assert.equal(store.file, file);
   assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
   assert.equal((await fs.stat(path.dirname(file))).mode & 0o777, 0o700);
@@ -70,11 +70,14 @@ test('a corrupt secrets.json fails loudly', async (t) => {
 });
 
 test('loadConfig requires the host-provided env', () => {
-  assert.throws(() => loadConfig({ CONDUCTOR_URL: 'http://x' }), /PROJECTS_ROOT/);
-  assert.throws(() => loadConfig({ PROJECTS_ROOT: '/tmp' }), /CONDUCTOR_URL/);
-  const c = loadConfig({ PROJECTS_ROOT: '/r', CONDUCTOR_URL: 'http://127.0.0.1:8/', PORT: '1234' });
+  assert.throws(() => loadConfig({ CONDUCTOR_URL: 'http://x' }), /CONDUCTOR_PLUGIN_DATA_DIR/);
+  assert.throws(() => loadConfig({ CONDUCTOR_PLUGIN_DATA_DIR: '', CONDUCTOR_URL: 'http://x' }), /CONDUCTOR_PLUGIN_DATA_DIR/);
+  assert.throws(() => loadConfig({ CONDUCTOR_PLUGIN_DATA_DIR: 'data/code-live', CONDUCTOR_URL: 'http://x' }), /absolute/);
+  assert.throws(() => loadConfig({ CONDUCTOR_PLUGIN_DATA_DIR: '/d/code-live' }), /CONDUCTOR_URL/);
+  const c = loadConfig({ CONDUCTOR_PLUGIN_DATA_DIR: '/d/code-live/', CONDUCTOR_URL: 'http://127.0.0.1:8/', PORT: '1234' });
   assert.equal(c.port, 1234);
-  assert.equal(c.dataDir, path.join('/r', '.code-live'));
+  assert.equal(c.dataDir, '/d/code-live');
+  assert.equal(loadConfig({ PROJECTS_ROOT: '/r', CONDUCTOR_PLUGIN_DATA_DIR: '/d/code-live', CONDUCTOR_URL: 'http://x' }).dataDir, '/d/code-live', 'nothing is derived from PROJECTS_ROOT');
   assert.equal(c.hostWsUrl, 'ws://127.0.0.1:8/ws');
   assert.equal(c.geminiWsUrl, 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained');
 });

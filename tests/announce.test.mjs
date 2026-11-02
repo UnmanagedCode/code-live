@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { startFakeHost, mcpOk, mcpThrown } from './fakes/fakeHost.mjs';
-import { startApp, sseClient, callTool, waitFor, tempDir, CONDUCTOR_A, CONDUCTOR_B, WORKER } from './helpers.mjs';
+import { startApp, sseClient, callTool, waitFor, tempDir, dataDirIn, CONDUCTOR_A, CONDUCTOR_B, WORKER } from './helpers.mjs';
 
 const reply = (text) => ({ kind: 'assistant_message', message: { content: [{ type: 'text', text }] } });
 
@@ -120,7 +120,7 @@ test('a turn finished while the backend was down is announced at startup', async
   await first.stop({ keepRoot: true });
 
   host.finishTurn('cond-a', 'done during the restart', { notify: false });
-  const second = await startApp({ host, projectsRoot: first.root });
+  const second = await startApp({ host, root: first.root });
   t.after(async () => { await second.stop(); await host.close(); });
   // The page's EventSource reconnects with the previous process's id and
   // gets the startup announcement replayed.
@@ -150,7 +150,7 @@ test('?lastEventId= replays like the Last-Event-ID header, and the header wins w
   await first.stop({ keepRoot: true });
 
   host.finishTurn('cond-a', 'during the restart', { notify: false });
-  const second = await startApp({ host, projectsRoot: first.root });
+  const second = await startApp({ host, root: first.root });
   t.after(async () => { await second.stop(); await host.close(); });
   const viaQuery = sseClient(`${second.url}/api/events?lastEventId=${encodeURIComponent(oldBootId)}`);
   t.after(() => viaQuery.close());
@@ -806,9 +806,9 @@ test('a conductor whose events route 404s while still listed is pruned from the 
 test('a legacy state.json with an active target announces nothing', async (t) => {
   const host = await startFakeHost({ instances: [CONDUCTOR_A] });
   const root = await tempDir();
-  await fs.mkdir(path.join(root, '.code-live'), { recursive: true });
-  await fs.writeFile(path.join(root, '.code-live', 'state.json'), JSON.stringify({ activeTargetId: 'cond-a', lastHandledTurnSeq: -1, lastHandledMsgId: null, lastHandledAskId: null }));
-  const app = await startApp({ host, projectsRoot: root });
+  await fs.mkdir(dataDirIn(root), { recursive: true });
+  await fs.writeFile(path.join(dataDirIn(root), 'state.json'), JSON.stringify({ activeTargetId: 'cond-a', lastHandledTurnSeq: -1, lastHandledMsgId: null, lastHandledAskId: null }));
+  const app = await startApp({ host, root });
   t.after(async () => { await app.stop(); await host.close(); });
   const sse = sseClient(`${app.url}/api/events`);
   t.after(() => sse.close());

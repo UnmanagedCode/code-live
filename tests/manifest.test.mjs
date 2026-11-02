@@ -58,5 +58,5 @@ test('package.json: no runtime dependencies; the UI is devDependencies built on 
 test('.gitignore covers what npm install writes', () => {
   const lines = readFileSync(new URL('../.gitignore', import.meta.url), 'utf8').split('\n').map((l) => l.trim());
   // No trailing slash on node_modules: a worktree's node_modules is a symlink, which `node_modules/` does not match.
-  for (const l of ['node_modules', 'frontend/dist/', 'package-lock.json', '.code-live/']) assert.ok(lines.includes(l), l);
+  for (const l of ['node_modules', 'frontend/dist/', 'package-lock.json']) assert.ok(lines.includes(l), l);
 });
