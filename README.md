@@ -43,7 +43,7 @@ Open **Settings** at the bottom of the Code Live page.
 
 The key:
 
-- It is stored at `$CONDUCTOR_PLUGIN_DATA_DIR/secrets.json` (file mode `0600`, directory `0700`, written atomically).
+- It is stored at `$CONDUCTOR_PLUGIN_DATA_DIR/secrets.json` (file mode `0600`, directory `0700`, written atomically; a migrated store keeps the modes it had).
 - The page never receives it back. Only `Key set (••••<last 4>)` is shown.
 - The browser gets a single-use **ephemeral token** per connection, minted by the backend. The token locks the model, voice, tools and system prompt, so the page cannot change them.
 

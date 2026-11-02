@@ -125,7 +125,12 @@ test('data dir equal to the legacy path: same, untouched', async (t) => {
 test('an empty target dir is replaced by the legacy store', async (t) => {
   const f = await fixture(t);
   await fs.mkdir(f.dataDir, { recursive: true });
-  assert.equal(await migrateLegacyStore({ env: f.env, dataDir: f.dataDir, log: quiet }), 'moved');
+  // Fails when the destination exists at call time, so only an earlier rmdir lets the move succeed.
+  const rename = async (from, to) => {
+    if (await exists(to)) throw Object.assign(new Error('destination exists'), { code: 'EEXIST' });
+    return fs.rename(from, to);
+  };
+  assert.equal(await migrateLegacyStore({ env: f.env, dataDir: f.dataDir, log: quiet, rename }), 'moved');
   assert.equal(await mode(path.join(f.dataDir, 'secrets.json')), 0o600);
   assert.equal(await mode(f.dataDir), 0o700);
   assert.equal(await exists(f.legacyDir), false);
@@ -162,6 +167,25 @@ test('a file or symlink as the legacy path is refused and nothing is created', a
   }
 });
 
+test('an uninspectable legacy path is refused, never reported absent', async (t) => {
+  const root = await tempDir();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const notDir = path.join(root, 'file');
+  await fs.writeFile(notDir, 'x');
+  const f = { legacyDir: path.join(notDir, '.code-live'), dataDir: path.join(root, 'data', 'code-live') };
+  await assert.rejects(migrateLegacyStore({ env: { PROJECTS_ROOT: notDir }, dataDir: f.dataDir, log: quiet }), (e) => assertRefusal(e, f, { has: ['cannot inspect'] }));
+  assert.equal(await exists(path.join(root, 'data')), false);
+});
+
+test('an uninspectable target is refused and the legacy store is untouched', async (t) => {
+  const f = await fixture(t);
+  const notDir = path.join(f.root, 'file');
+  await fs.writeFile(notDir, 'x');
+  f.dataDir = path.join(notDir, 'code-live');
+  await assert.rejects(migrateLegacyStore({ env: f.env, dataDir: f.dataDir, log: quiet }), (e) => assertRefusal(e, f, { has: ['cannot inspect'] }));
+  await assertLegacyIntact(f);
+});
+
 test('EXDEV is refused with an mv hint and the legacy store is intact', async (t) => {
   const f = await fixture(t);
   const rename = async () => { throw Object.assign(new Error('cross-device link not permitted'), { code: 'EXDEV' }); };
@@ -183,11 +207,13 @@ test('any other rename error is refused and the legacy store is intact', async (
 test('start() aborts on a refusal before listening, leaving both dirs unchanged', async (t) => {
   const f = await fixture(t);
   await fs.mkdir(f.dataDir, { recursive: true });
-  await fs.writeFile(path.join(f.dataDir, 'state.json'), '{"watched":{}}');
+  // A corrupt state.json makes buildDeps fail with STORE_CORRUPT, so only a migration that runs first yields ESTOREMIGRATE.
+  await fs.writeFile(path.join(f.dataDir, 'state.json'), '{not json');
   const env = { ...f.env, CONDUCTOR_PLUGIN_DATA_DIR: f.dataDir, CONDUCTOR_URL: 'http://127.0.0.1:9', PORT: '0' };
   await assert.rejects(start(env), (e) => assertRefusal(e, f));
   await assertLegacyIntact(f);
   assert.deepEqual(await fs.readdir(f.dataDir), ['state.json']);
+  assert.equal(await fs.readFile(path.join(f.dataDir, 'state.json'), 'utf8'), '{not json');
 });
 
 test('start() validates config before migrating', async (t) => {

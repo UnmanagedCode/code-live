@@ -109,7 +109,7 @@ Everything lives under `$CONDUCTOR_PLUGIN_DATA_DIR` (directory mode 0700, create
 | `rename` succeeds | `moved` |
 
 - A refusal is an `ESTOREMIGRATE` error naming both paths and the fix. It never moves, copies or changes store data and never includes the key; it may leave an emptied target removed, or empty parents in place.
-- The rename moves the directory itself, so `secrets.json` keeps 0600 and the directory keeps 0700. There is no copy branch.
+- The move is a bare `rename` of the directory, so the store keeps the modes it already has (`secrets.json` 0600 and the directory 0700 as code-live writes them); no chmod is applied. Parents the migration creates are 0700. There is no copy branch.
 - On refusal `start()` rejects and the process exits 1 with no server, link or reconcile. The data dir is created only by a write through a running server, so a refused boot never starts an empty store beside the legacy one. Every restart refuses again until the fix is applied.
 
 ## Host link (`ccLink`)
